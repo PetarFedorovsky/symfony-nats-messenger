@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace IDCT\NatsMessenger\Options;
 
 use IDCT\NATS\Core\NatsClient;
+use IDCT\NATS\JetStream\Enum\DiscardPolicy;
+use IDCT\NATS\JetStream\Enum\ReplayPolicy;
+use IDCT\NATS\JetStream\Enum\RetentionPolicy;
 use IDCT\NATS\JetStream\Enum\StorageBackend;
 use IDCT\NatsMessenger\TypeCoercion;
 
@@ -28,6 +31,7 @@ final readonly class NatsTransportConfiguration
      * @param bool                 $natsRetryHandlerEnabled True when retry handling is delegated to NATS (NAK mode)
      * @param bool                 $scheduledMessagesEnabled True when delayed/scheduled message publishing is enabled
      * @param bool                 $ackSyncEnabled          True when acknowledgements should wait for server confirmation (double-ack)
+     * @param bool                 $autoSetupEnabled        True when the transport should provision the stream/consumer on first use
      */
     public function __construct(
         public string $topic,
@@ -37,6 +41,7 @@ final readonly class NatsTransportConfiguration
         private bool $natsRetryHandlerEnabled,
         private bool $scheduledMessagesEnabled = false,
         private bool $ackSyncEnabled = false,
+        private bool $autoSetupEnabled = false,
     ) {
     }
 
@@ -146,6 +151,146 @@ final readonly class NatsTransportConfiguration
     }
 
     /**
+     * Returns the configured stream retention policy, or null to use the JetStream default (limits).
+     *
+     * Retention is fixed at stream creation: NATS rejects changing it on an existing stream, so
+     * {@see NatsTransport::setup()} writes it only when the stream is created and preserves the server
+     * value on update. Changing retention on a live stream requires recreating it.
+     */
+    public function retention(): ?RetentionPolicy
+    {
+        $value = $this->options[TransportOption::STREAM_RETENTION->value] ?? null;
+
+        return $value === null ? null : RetentionPolicy::from(TypeCoercion::stringValue($value));
+    }
+
+    /**
+     * Returns the configured stream discard policy, or null to use the JetStream default (old).
+     *
+     * Determines what JetStream does when a stream limit is reached: discard the oldest messages
+     * ({@see DiscardPolicy::Old}) or reject new ones ({@see DiscardPolicy::New}).
+     */
+    public function discard(): ?DiscardPolicy
+    {
+        $value = $this->options[TransportOption::STREAM_DISCARD->value] ?? null;
+
+        return $value === null ? null : DiscardPolicy::from(TypeCoercion::stringValue($value));
+    }
+
+    /**
+     * Returns the stream de-duplication window in seconds, or null to use the JetStream default.
+     *
+     * JetStream ignores a duplicate publish (same Nats-Msg-Id) seen within this window. Validated at
+     * build time to never exceed {@see streamMaxAgeSeconds()} when both are set.
+     */
+    public function duplicateWindowSeconds(): ?int
+    {
+        return $this->nullableIntOption(TransportOption::STREAM_DUPLICATE_WINDOW);
+    }
+
+    /**
+     * Returns the maximum size of a single message in bytes, or null for unlimited.
+     */
+    public function streamMaxMessageSize(): ?int
+    {
+        return $this->nullableIntOption(TransportOption::STREAM_MAX_MESSAGE_SIZE);
+    }
+
+    /**
+     * Returns the maximum number of consumers allowed on the stream, or null for unlimited.
+     */
+    public function streamMaxConsumers(): ?int
+    {
+        return $this->nullableIntOption(TransportOption::STREAM_MAX_CONSUMERS);
+    }
+
+    /**
+     * Returns the configured stream compression algorithm ('none' or 's2'), or null to leave it unset.
+     */
+    public function compression(): ?string
+    {
+        $value = $this->options[TransportOption::STREAM_COMPRESSION->value] ?? null;
+
+        return $value === null ? null : TypeCoercion::stringValue($value);
+    }
+
+    /**
+     * Returns the human-readable stream description, or null when unset.
+     */
+    public function streamDescription(): ?string
+    {
+        $value = $this->options[TransportOption::STREAM_DESCRIPTION->value] ?? null;
+
+        return $value === null ? null : TypeCoercion::stringValue($value);
+    }
+
+    /**
+     * Returns whether stream message deletion is denied, or null to leave the server default untouched.
+     */
+    public function denyDelete(): ?bool
+    {
+        return $this->nullableBoolOption(TransportOption::STREAM_DENY_DELETE);
+    }
+
+    /**
+     * Returns whether stream purge is denied, or null to leave the server default untouched.
+     */
+    public function denyPurge(): ?bool
+    {
+        return $this->nullableBoolOption(TransportOption::STREAM_DENY_PURGE);
+    }
+
+    /**
+     * Returns whether direct get access is allowed, or null to leave the server default untouched.
+     */
+    public function allowDirect(): ?bool
+    {
+        return $this->nullableBoolOption(TransportOption::STREAM_ALLOW_DIRECT);
+    }
+
+    /**
+     * Returns whether rollup headers are allowed, or null to leave the server default untouched.
+     */
+    public function allowRollupHeaders(): ?bool
+    {
+        return $this->nullableBoolOption(TransportOption::STREAM_ALLOW_ROLLUP_HEADERS);
+    }
+
+    /**
+     * Returns the consumer max-ack-pending limit, or null to use the JetStream default.
+     *
+     * Caps how many delivered-but-unacknowledged messages a consumer may have outstanding; the
+     * primary flow-control lever for a pull consumer.
+     */
+    public function maxAckPending(): ?int
+    {
+        return $this->nullableIntOption(TransportOption::MAX_ACK_PENDING);
+    }
+
+    /**
+     * Returns the consumer inactivity threshold in milliseconds, or null to use the JetStream default.
+     *
+     * JetStream removes the durable consumer if it receives no pull requests for this long; the source
+     * value (inactive_threshold) is in seconds.
+     */
+    public function inactiveThresholdMs(): ?int
+    {
+        $value = $this->options[TransportOption::INACTIVE_THRESHOLD->value] ?? null;
+
+        return $value === null ? null : max(1, TypeCoercion::secondsToMs($value));
+    }
+
+    /**
+     * Returns the configured consumer replay policy, or null to use the JetStream default (instant).
+     */
+    public function replayPolicy(): ?ReplayPolicy
+    {
+        $value = $this->options[TransportOption::REPLAY_POLICY->value] ?? null;
+
+        return $value === null ? null : ReplayPolicy::from(TypeCoercion::stringValue($value));
+    }
+
+    /**
      * Returns normalized retry handler mode.
      *
      * @see RetryHandler::SYMFONY TERM the message; Symfony handles redelivery via failure transport.
@@ -244,6 +389,18 @@ final readonly class NatsTransportConfiguration
     }
 
     /**
+     * Returns true when the transport should provision the stream/consumer on first send/get.
+     *
+     * When enabled, {@see NatsTransport} runs {@see NatsTransport::setup()} once, lazily, on the first
+     * transport operation. Defaults to false, so by default the stream/consumer must be provisioned
+     * explicitly via `messenger:setup-transports`.
+     */
+    public function isAutoSetupEnabled(): bool
+    {
+        return $this->autoSetupEnabled;
+    }
+
+    /**
      * Retrieves an integer option with fallback, using TypeCoercion for safe casting.
      */
     private function intOption(TransportOption $option, int $default): int
@@ -262,6 +419,20 @@ final readonly class NatsTransportConfiguration
         $value = $this->options[$option->value] ?? null;
 
         return $value === null ? null : TypeCoercion::intValue($value);
+    }
+
+    /**
+     * Retrieves a nullable boolean option: null when the option is unset, otherwise the coerced bool.
+     *
+     * Backs the tri-state stream policy flags (deny_delete, deny_purge, allow_direct,
+     * allow_rollup_headers) so an unset flag leaves the server value untouched rather than forcing a
+     * default - distinct from the always-applied boolean options (scheduled_messages, ack_sync).
+     */
+    private function nullableBoolOption(TransportOption $option): ?bool
+    {
+        $value = $this->options[$option->value] ?? null;
+
+        return $value === null ? null : TypeCoercion::boolValue($value);
     }
 
     /**

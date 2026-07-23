@@ -253,14 +253,41 @@ framework:
           max_batch_timeout: 1.0            # Timeout in seconds for batch fetching (default: 1)
           connection_timeout: 1.0           # Connection (dial) timeout in seconds (default: 1)
 
+          # Consumer Flow Control & Lifecycle
+          max_ack_pending: 1000             # Max delivered-but-unacked messages outstanding
+                                            # (null = server default). Primary flow-control lever.
+          inactive_threshold: 300           # Seconds of no pull activity before NATS removes the
+                                            # durable consumer (null = server default).
+          replay_policy: 'instant'          # instant|original (default: null = server default 'instant')
+
           # Stream Retention Policies
           stream_max_age: 86400             # Max message age in seconds (0 = unlimited, default: 0)
           stream_max_bytes: 1073741824      # Max storage size in bytes (null = unlimited)
           stream_max_messages: 1000000      # Max number of messages in the stream (null = unlimited)
           stream_max_messages_per_subject: 1000 # Max number of messages retained per subject (null = unlimited)
+          stream_max_message_size: 1048576  # Max size of a single message in bytes (null = unlimited)
+          stream_max_consumers: 10          # Max consumers allowed on the stream (null = unlimited)
+
+          # Stream Retention & De-duplication Behavior
+          stream_retention: 'limits'        # limits|interest|workqueue (default: null = server default 'limits').
+                                            # ⚠️ Immutable once the stream exists: NATS rejects changing it,
+                                            # so a changed value is ignored on an existing stream - recreate
+                                            # the stream to change retention (see note below).
+          stream_discard: 'old'             # old|new - what to drop when a limit is hit (default: null = 'old')
+          stream_duplicate_window: 120      # De-duplication window in seconds (null = server default).
+                                            # Must not exceed stream_max_age when that is set.
 
           # Storage Backend
           stream_storage: 'file'            # Storage type: 'file' or 'memory' (default: 'file')
+                                            # ⚠️ Immutable once the stream exists (like stream_retention).
+          stream_compression: 'none'        # none|s2 (default: null = server default 'none')
+          stream_description: 'my stream'   # Human-readable stream description (null = unset)
+
+          # Stream Access Policy (null = leave the server default untouched)
+          stream_deny_delete: false         # Deny message deletion from the stream
+          stream_deny_purge: false          # Deny stream purge
+          stream_allow_direct: false        # Allow direct get access
+          stream_allow_rollup_headers: false # Allow Nats-Rollup headers
 
           # High Availability
           stream_replicas: 1                # Number of replicas (default: 1)
@@ -294,6 +321,11 @@ framework:
                                             # When enabled, Symfony DelayStamp triggers NATS
                                             # scheduled message delivery via Nats-Schedule headers
 
+          # Provisioning
+          auto_setup: false                 # Provision the stream/consumer on first send/get (default: false).
+                                            # When false (the default), run `messenger:setup-transports`
+                                            # explicitly. When true, setup() runs once, lazily, on first use.
+
           # TLS Configuration
           tls_required: false               # Force TLS for NATS connection (default: false)
           tls_handshake_first: false        # Use TLS-first handshake mode (default: false)
@@ -312,7 +344,7 @@ framework:
           nkey: null                        # NKey public value
 ```
 
-> **Tested by:** `testReadmeConfigurationOptionsAreAccepted` (all options above), `testReadmeBatchingExamplesAreAccepted`, `testReadmeTimeoutExamplesAreAccepted`, `testReadmeStreamRetentionExamplesAreAccepted`, `testBuildWithTlsAndAuthOptionsPropagatesToNatsOptions`
+> **Tested by:** `testReadmeConfigurationOptionsAreAccepted` (all options above), `testReadmeBatchingExamplesAreAccepted`, `testReadmeTimeoutExamplesAreAccepted`, `testReadmeStreamRetentionExamplesAreAccepted`, `testBuildAcceptsAndNormalizesNewStreamAndConsumerOptions`, `testSetupPassesNewStreamPolicyOptions`, `testSetupPassesNewConsumerOptions`, `testBuildWithTlsAndAuthOptionsPropagatesToNatsOptions`
 
 ### Retry Handler Behavior
 
@@ -651,9 +683,12 @@ The `events` stream will have both `orders` and `payments` as subjects.
 
 > **Note:** When a stream already exists, setup reads the current JetStream configuration, merges in any new subjects, and then overlays the stream settings managed by this transport. Existing subjects are preserved, duplicate subjects are not added, and the existing storage backend is kept for already-created streams.
 
-### Setup on Initialization
+### Provisioning the Stream & Consumer
 
-Automatically create streams and consumers on first run:
+The stream and its durable pull consumer must exist before messages flow. There are two ways to
+provision them.
+
+**Explicit (default, recommended for production).** Provision once via the Symfony command:
 
 ```yaml
 framework:
@@ -665,13 +700,30 @@ framework:
           consumer: 'my-consumer'
 ```
 
-Then call setup command:
-
 ```bash
 symfony console messenger:setup-transports nats_transport
 ```
 
-> **Tested by:** `testSetupCreatesStreamAndConsumer`, `testSetupPassesConfiguredStreamOptions`, `testSetupUpdatesExistingStreamMergesSubjectsAndPreservesServerConfig`, Behat scenarios `Setup NATS stream with max age configuration`, `Setup command handles existing streams gracefully`, and `Custom consumer name is registered in JetStream`
+**Automatic (`auto_setup`).** Set `auto_setup=true` to have the transport provision the stream and
+consumer itself, lazily, on the first `send()`/`get()`. Setup runs at most once per transport instance.
+It defaults to **`false`**, so unless you opt in, provisioning stays explicit (no hidden
+stream/consumer creation on the hot path).
+
+```yaml
+framework:
+  messenger:
+    transports:
+      nats_transport:
+        dsn: 'nats-jetstream://localhost/my-stream/my-topic?auto_setup=true'
+```
+
+> **Note on retention & storage:** `stream_retention` and `stream_storage` are fixed when the stream is
+> created - NATS rejects changing either on an existing stream. On the update path the transport
+> preserves the live server values, so changing these options on an already-created stream is a no-op.
+> To change retention or storage, recreate the stream (delete it, then re-run setup / let `auto_setup`
+> recreate it).
+
+> **Tested by:** `testSetupCreatesStreamAndConsumer`, `testSetupPassesConfiguredStreamOptions`, `testSetupPassesNewStreamPolicyOptions`, `testSetupPassesNewConsumerOptions`, `testAutoSetupProvisionsOnFirstSendOnce`, `testAutoSetupProvisionsOnFirstGet`, `testAutoSetupDisabledByDefaultDoesNotProvisionOnSend`, `testSetupUpdatesExistingStreamMergesSubjectsAndPreservesServerConfig`, Behat scenarios `Setup NATS stream with max age configuration`, `Setup command handles existing streams gracefully`, and `Custom consumer name is registered in JetStream`
 
 ### Delayed / Scheduled Messages
 

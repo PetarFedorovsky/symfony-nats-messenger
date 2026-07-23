@@ -80,6 +80,30 @@ final class TypeCoercion
     }
 
     /**
+     * Coerces a mixed value to bool.
+     *
+     * Recognizes bool as-is, int (0 = false, non-zero = true), and the truthy string tokens
+     * '1', 'true', 'yes', 'on' (case-insensitive). Returns $default for every other value - arrays,
+     * objects, null, and unrecognized strings - so a stray option can never accidentally read as true.
+     */
+    public static function boolValue(mixed $value, bool $default = false): bool
+    {
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        if (is_int($value)) {
+            return $value !== 0;
+        }
+
+        if (is_string($value)) {
+            return in_array(strtolower($value), ['1', 'true', 'yes', 'on'], true);
+        }
+
+        return $default;
+    }
+
+    /**
      * Converts a mixed seconds value to whole milliseconds.
      *
      * Applies the same coercion policy as {@see floatValue()} (numeric strings/ints/floats accepted,

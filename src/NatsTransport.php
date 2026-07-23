@@ -72,6 +72,9 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
     /** Resolved immutable transport configuration (consumer, batching, timeouts, etc.). */
     protected NatsTransportConfiguration $configuration;
 
+    /** Tracks whether the one-shot {@see autoSetupIfEnabled()} provisioning has already run this instance. */
+    private bool $autoSetupDone = false;
+
     /**
      * Creates a transport instance from DSN/options and optional serializer override.
      *
@@ -135,6 +138,8 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
      */
     public function send(Envelope $envelope): Envelope
     {
+        $this->autoSetupIfEnabled();
+
         $uuid = (string) Uuid::v4();
         $envelope = $envelope->with(new TransportMessageIdStamp($uuid));
 
@@ -197,6 +202,8 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
      */
     public function get(): iterable
     {
+        $this->autoSetupIfEnabled();
+
         try {
             $messages = $this->jetStream()->fetchBatch(
                 $this->streamName,
@@ -470,6 +477,21 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
                 $consumerConfiguration->backoff($backoffMs);
             }
 
+            $maxAckPending = $this->configuration->maxAckPending();
+            if ($maxAckPending !== null) {
+                $consumerConfiguration->maxAckPending($maxAckPending);
+            }
+
+            $inactiveThresholdMs = $this->configuration->inactiveThresholdMs();
+            if ($inactiveThresholdMs !== null) {
+                $consumerConfiguration->inactiveThreshold($inactiveThresholdMs);
+            }
+
+            $replayPolicy = $this->configuration->replayPolicy();
+            if ($replayPolicy !== null) {
+                $consumerConfiguration->replayPolicy($replayPolicy);
+            }
+
             $consumerInfo = $this->jetStream()->addConsumer($this->streamName, $consumerConfiguration)->await();
             $this->assertConsumerMatchesConfiguration($consumerInfo);
         } catch (UnsupportedFeatureException $unsupportedFeature) {
@@ -492,6 +514,25 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
         }
 
         return $receivedStamp;
+    }
+
+    /**
+     * Provisions the stream and consumer on first use when auto_setup is enabled.
+     *
+     * {@see setup()} runs at most once per transport instance, lazily, from the first
+     * {@see send()}/{@see get()}. A no-op when auto_setup is disabled (the default), so the
+     * stream/consumer must then be provisioned explicitly via `messenger:setup-transports`. The
+     * done-flag is set only after {@see setup()} succeeds, so a transient provisioning failure is
+     * retried on the next call rather than silently skipped.
+     */
+    private function autoSetupIfEnabled(): void
+    {
+        if ($this->autoSetupDone || !$this->configuration->isAutoSetupEnabled()) {
+            return;
+        }
+
+        $this->setup();
+        $this->autoSetupDone = true;
     }
 
     /**
@@ -662,8 +703,56 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
             $streamConfiguration->maxMsgsPerSubject($this->configuration->streamMaxMessagesPerSubject());
         }
 
+        if ($this->configuration->streamMaxMessageSize() !== null) {
+            $streamConfiguration->maxMsgSize($this->configuration->streamMaxMessageSize());
+        }
+
+        if ($this->configuration->streamMaxConsumers() !== null) {
+            $streamConfiguration->maxConsumers($this->configuration->streamMaxConsumers());
+        }
+
         if ($this->configuration->streamReplicas() > 0) {
             $streamConfiguration->replicas($this->configuration->streamReplicas());
+        }
+
+        // Retention is set only at creation - NATS rejects changing it on an existing stream, so the
+        // update path ({@see buildUpdatedStreamConfiguration()}) preserves the server value instead.
+        $retention = $this->configuration->retention();
+        if ($retention !== null) {
+            $streamConfiguration->retention($retention);
+        }
+
+        $discard = $this->configuration->discard();
+        if ($discard !== null) {
+            $streamConfiguration->discard($discard);
+        }
+
+        if ($this->configuration->duplicateWindowSeconds() !== null) {
+            $streamConfiguration->duplicateWindow($this->configuration->duplicateWindowSeconds());
+        }
+
+        if ($this->configuration->compression() !== null) {
+            $streamConfiguration->compression($this->configuration->compression());
+        }
+
+        if ($this->configuration->streamDescription() !== null) {
+            $streamConfiguration->description($this->configuration->streamDescription());
+        }
+
+        if ($this->configuration->denyDelete() !== null) {
+            $streamConfiguration->denyDelete($this->configuration->denyDelete());
+        }
+
+        if ($this->configuration->denyPurge() !== null) {
+            $streamConfiguration->denyPurge($this->configuration->denyPurge());
+        }
+
+        if ($this->configuration->allowDirect() !== null) {
+            $streamConfiguration->allowDirect($this->configuration->allowDirect());
+        }
+
+        if ($this->configuration->allowRollupHeaders() !== null) {
+            $streamConfiguration->allowRollupHeaders($this->configuration->allowRollupHeaders());
         }
 
         if ($this->configuration->isScheduledMessagesEnabled()) {
@@ -747,9 +836,19 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
         $updatedConfiguration['max_bytes'] = $this->configuration->streamMaxBytes() ?? -1;
         $updatedConfiguration['max_msgs'] = $this->configuration->streamMaxMessages() ?? -1;
         $updatedConfiguration['max_msgs_per_subject'] = $this->configuration->streamMaxMessagesPerSubject() ?? -1;
+        $updatedConfiguration['max_msg_size'] = $this->configuration->streamMaxMessageSize() ?? -1;
+        $updatedConfiguration['max_consumers'] = $this->configuration->streamMaxConsumers() ?? -1;
 
         if (array_key_exists('storage', $serverConfiguration)) {
             $updatedConfiguration['storage'] = $serverConfiguration['storage'];
+        }
+
+        // Retention, like storage, is immutable on an existing stream: NATS rejects an update that
+        // changes it. Preserve the server's value so update never attempts the change - a different
+        // stream_retention in the DSN is silently ignored on an existing stream; recreate the stream to
+        // change it. buildManagedStreamConfiguration() sets retention only at creation time.
+        if (array_key_exists('retention', $serverConfiguration)) {
+            $updatedConfiguration['retention'] = $serverConfiguration['retention'];
         }
 
         // Preserve the existing replica count unless stream_replicas was explicitly configured.

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **New stream configuration DSN options** exposing JetStream stream settings the underlying client
+  already supports but the transport did not surface: `stream_retention` (`limits`|`interest`|`workqueue`),
+  `stream_discard` (`old`|`new`), `stream_duplicate_window` (seconds), `stream_max_message_size` (bytes),
+  `stream_max_consumers`, `stream_compression` (`none`|`s2`), `stream_description`, and the access-policy
+  flags `stream_deny_delete`, `stream_deny_purge`, `stream_allow_direct`, `stream_allow_rollup_headers`.
+  Enum/allowlist-backed options are validated with clear errors (like `retry_handler`); numeric options
+  reuse the existing positive/non-negative validators.
+- **New consumer configuration DSN options**: `max_ack_pending`, `inactive_threshold` (seconds), and
+  `replay_policy` (`instant`|`original`).
+- **`auto_setup` option** (default `false`) mirroring the Symfony AMQP transport. When enabled, the
+  transport provisions the stream and consumer once, lazily, on the first `send()`/`get()` instead of
+  requiring `messenger:setup-transports`. Defaulting to `false` preserves existing behavior.
+- **`TypeCoercion::boolValue()`** centralizing the mixed→bool casting policy previously inlined in the
+  configuration builder.
+
+### Changed
+- **`stream_retention` and `stream_storage` are treated as immutable on an existing stream.** Both are
+  written only at stream creation; on the update path the transport preserves the live server value
+  (NATS rejects changing either on an existing stream). A `stream_duplicate_window` larger than a finite
+  `stream_max_age` is now rejected at build time with a clear error instead of failing at setup.
+
 ## [5.0.0] - 2026-06-17
 
 This is a **major** release. It is backward-incompatible for two reasons even though the transport's own

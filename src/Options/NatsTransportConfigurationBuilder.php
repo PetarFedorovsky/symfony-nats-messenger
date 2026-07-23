@@ -6,6 +6,9 @@ namespace IDCT\NatsMessenger\Options;
 
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
+use IDCT\NATS\JetStream\Enum\DiscardPolicy;
+use IDCT\NATS\JetStream\Enum\ReplayPolicy;
+use IDCT\NATS\JetStream\Enum\RetentionPolicy;
 use IDCT\NATS\JetStream\Enum\StorageBackend;
 use IDCT\NatsMessenger\TypeCoercion;
 use InvalidArgumentException;
@@ -40,12 +43,26 @@ final class NatsTransportConfigurationBuilder
         TransportOption::BATCHING->value => 1,
         TransportOption::MAX_BATCH_TIMEOUT->value => 1,
         TransportOption::CONNECTION_TIMEOUT->value => 1,
+        TransportOption::MAX_ACK_PENDING->value => null,
+        TransportOption::INACTIVE_THRESHOLD->value => null,
+        TransportOption::REPLAY_POLICY->value => null,
         TransportOption::STREAM_MAX_AGE->value => 0,
         TransportOption::STREAM_MAX_BYTES->value => null,
         TransportOption::STREAM_MAX_MESSAGES->value => null,
         TransportOption::STREAM_MAX_MESSAGES_PER_SUBJECT->value => null,
+        TransportOption::STREAM_MAX_MESSAGE_SIZE->value => null,
+        TransportOption::STREAM_MAX_CONSUMERS->value => null,
         TransportOption::STREAM_STORAGE->value => StorageBackend::File->value,
         TransportOption::STREAM_REPLICAS->value => null,
+        TransportOption::STREAM_RETENTION->value => null,
+        TransportOption::STREAM_DISCARD->value => null,
+        TransportOption::STREAM_DUPLICATE_WINDOW->value => null,
+        TransportOption::STREAM_COMPRESSION->value => null,
+        TransportOption::STREAM_DESCRIPTION->value => null,
+        TransportOption::STREAM_DENY_DELETE->value => null,
+        TransportOption::STREAM_DENY_PURGE->value => null,
+        TransportOption::STREAM_ALLOW_DIRECT->value => null,
+        TransportOption::STREAM_ALLOW_ROLLUP_HEADERS->value => null,
         TransportOption::RETRY_HANDLER->value => RetryHandler::SYMFONY->value,
         TransportOption::NAK_DELAY->value => 0,
         TransportOption::ACK_WAIT->value => null,
@@ -53,6 +70,7 @@ final class NatsTransportConfigurationBuilder
         TransportOption::BACKOFF->value => null,
         TransportOption::SCHEDULED_MESSAGES->value => false,
         TransportOption::ACK_SYNC->value => false,
+        TransportOption::AUTO_SETUP->value => false,
         TransportOption::TLS_REQUIRED->value => false,
         TransportOption::TLS_HANDSHAKE_FIRST->value => false,
         TransportOption::TLS_CA_FILE->value => null,
@@ -115,6 +133,7 @@ final class NatsTransportConfigurationBuilder
             natsRetryHandlerEnabled: $configuration[TransportOption::RETRY_HANDLER->value] === RetryHandler::NATS->value,
             scheduledMessagesEnabled: $this->toBool($configuration[TransportOption::SCHEDULED_MESSAGES->value]),
             ackSyncEnabled: $this->toBool($configuration[TransportOption::ACK_SYNC->value]),
+            autoSetupEnabled: $this->toBool($configuration[TransportOption::AUTO_SETUP->value]),
         );
     }
 
@@ -239,13 +258,23 @@ final class NatsTransportConfigurationBuilder
         $this->assertNonNegativeNumber($configuration, TransportOption::STREAM_MAX_BYTES, true);
         $this->assertNonNegativeNumber($configuration, TransportOption::STREAM_MAX_MESSAGES, true);
         $this->assertNonNegativeNumber($configuration, TransportOption::STREAM_MAX_MESSAGES_PER_SUBJECT, true);
+        $this->assertNonNegativeNumber($configuration, TransportOption::STREAM_MAX_MESSAGE_SIZE, true);
+        $this->assertPositiveNumber($configuration, TransportOption::STREAM_MAX_CONSUMERS, true);
         $this->assertPositiveNumber($configuration, TransportOption::STREAM_REPLICAS, true);
+        $this->assertNonNegativeNumber($configuration, TransportOption::STREAM_DUPLICATE_WINDOW, true);
         $this->assertNonNegativeNumber($configuration, TransportOption::NAK_DELAY);
         $this->assertPositiveNumber($configuration, TransportOption::ACK_WAIT);
         $this->assertPositiveNumber($configuration, TransportOption::MAX_DELIVER, true);
+        $this->assertPositiveNumber($configuration, TransportOption::MAX_ACK_PENDING, true);
+        $this->assertPositiveNumber($configuration, TransportOption::INACTIVE_THRESHOLD);
         $this->assertBackoff($configuration);
         $this->assertMaxDeliverExceedsBackoff($configuration);
+        $this->assertDuplicateWindowNotExceedingMaxAge($configuration);
         $this->normalizeStorageBackend($configuration);
+        $this->normalizeStreamRetention($configuration);
+        $this->normalizeStreamDiscard($configuration);
+        $this->normalizeStreamCompression($configuration);
+        $this->normalizeReplayPolicy($configuration);
 
         return $configuration;
     }
@@ -271,6 +300,111 @@ final class NatsTransportConfigurationBuilder
         }
 
         $configuration[TransportOption::STREAM_STORAGE->value] = $storageBackend->value;
+    }
+
+    /**
+     * Validates and normalizes the optional stream retention policy, leaving it untouched when unset.
+     *
+     * @param array<string, mixed> $configuration Merged configuration array
+     */
+    private function normalizeStreamRetention(array &$configuration): void
+    {
+        $this->normalizeEnumOption(
+            $configuration,
+            TransportOption::STREAM_RETENTION,
+            static fn (string $value): ?RetentionPolicy => RetentionPolicy::tryFrom($value),
+            array_column(RetentionPolicy::cases(), 'value'),
+        );
+    }
+
+    /**
+     * Validates and normalizes the optional stream discard policy, leaving it untouched when unset.
+     *
+     * @param array<string, mixed> $configuration Merged configuration array
+     */
+    private function normalizeStreamDiscard(array &$configuration): void
+    {
+        $this->normalizeEnumOption(
+            $configuration,
+            TransportOption::STREAM_DISCARD,
+            static fn (string $value): ?DiscardPolicy => DiscardPolicy::tryFrom($value),
+            array_column(DiscardPolicy::cases(), 'value'),
+        );
+    }
+
+    /**
+     * Validates and normalizes the optional consumer replay policy, leaving it untouched when unset.
+     *
+     * @param array<string, mixed> $configuration Merged configuration array
+     */
+    private function normalizeReplayPolicy(array &$configuration): void
+    {
+        $this->normalizeEnumOption(
+            $configuration,
+            TransportOption::REPLAY_POLICY,
+            static fn (string $value): ?ReplayPolicy => ReplayPolicy::tryFrom($value),
+            array_column(ReplayPolicy::cases(), 'value'),
+        );
+    }
+
+    /**
+     * Validates and normalizes an optional enum-backed string option (case-insensitive input).
+     *
+     * When the option is unset it is left untouched. Otherwise the (lower-cased) value must map to a
+     * case of the backing enum via $tryFrom, or an InvalidArgumentException naming the allowed values
+     * is thrown - turning a typo into a clear configuration error instead of a server rejection.
+     *
+     * @param array<string, mixed>            $configuration Merged configuration array
+     * @param callable(string): ?\BackedEnum  $tryFrom       Enum resolver (e.g. RetentionPolicy::tryFrom(...))
+     * @param list<string>                     $allowed       Allowed values, for the error message
+     */
+    private function normalizeEnumOption(array &$configuration, TransportOption $option, callable $tryFrom, array $allowed): void
+    {
+        $value = $configuration[$option->value] ?? null;
+        if ($value === null) {
+            return;
+        }
+
+        $raw = TypeCoercion::stringValue($value);
+        $enum = $tryFrom(strtolower($raw));
+        if ($enum === null) {
+            throw new InvalidArgumentException(sprintf(
+                "Invalid %s option '%s'. Allowed values are '%s'.",
+                $option->value,
+                $raw,
+                implode("', '", $allowed),
+            ));
+        }
+
+        $configuration[$option->value] = $enum->value;
+    }
+
+    /**
+     * Validates and normalizes the optional stream compression algorithm, leaving it untouched when unset.
+     *
+     * Not an enum in the underlying client (a plain string field), so validated against an explicit
+     * allowlist here - the two values NATS accepts.
+     *
+     * @param array<string, mixed> $configuration Merged configuration array
+     */
+    private function normalizeStreamCompression(array &$configuration): void
+    {
+        $value = $configuration[TransportOption::STREAM_COMPRESSION->value] ?? null;
+        if ($value === null) {
+            return;
+        }
+
+        $raw = TypeCoercion::stringValue($value);
+        $normalized = strtolower($raw);
+        if (!in_array($normalized, ['none', 's2'], true)) {
+            throw new InvalidArgumentException(sprintf(
+                "Invalid %s option '%s'. Allowed values are 'none' or 's2'.",
+                TransportOption::STREAM_COMPRESSION->value,
+                $raw,
+            ));
+        }
+
+        $configuration[TransportOption::STREAM_COMPRESSION->value] = $normalized;
     }
 
     /**
@@ -367,6 +501,38 @@ final class NatsTransportConfigurationBuilder
     }
 
     /**
+     * Validates that the de-duplication window does not exceed the stream's max age.
+     *
+     * NATS rejects a stream whose duplicate_window is larger than a finite max_age
+     * ("duplicates window can not be larger then max age"). A max_age of 0 means unlimited, so any
+     * window is valid then. Validating here turns that into a clear configuration error instead of an
+     * opaque server failure at {@see \IDCT\NatsMessenger\NatsTransport::setup()} time.
+     *
+     * @param array<string, mixed> $configuration Merged configuration array
+     */
+    private function assertDuplicateWindowNotExceedingMaxAge(array $configuration): void
+    {
+        $duplicateWindow = $configuration[TransportOption::STREAM_DUPLICATE_WINDOW->value] ?? null;
+        if ($duplicateWindow === null) {
+            return;
+        }
+
+        $maxAge = TypeCoercion::intValue($configuration[TransportOption::STREAM_MAX_AGE->value] ?? 0);
+        if ($maxAge <= 0) {
+            return;
+        }
+
+        $duplicateWindowValue = TypeCoercion::intValue($duplicateWindow);
+        if ($duplicateWindowValue > $maxAge) {
+            throw new InvalidArgumentException(sprintf(
+                'The stream_duplicate_window option (%ds) must not exceed stream_max_age (%ds): NATS rejects a duplicate window larger than the stream max age.',
+                $duplicateWindowValue,
+                $maxAge,
+            ));
+        }
+    }
+
+    /**
      * Converts a raw option value to float for numeric validation.
      *
      * @throws InvalidArgumentException If the value is not numeric
@@ -404,24 +570,12 @@ final class NatsTransportConfigurationBuilder
     /**
      * Converts a mixed value to boolean.
      *
-     * Recognizes bool, int (0 = false), and string values ('1', 'true', 'yes', 'on').
-     * Returns false for all other types.
+     * Thin wrapper over {@see TypeCoercion::boolValue()} - kept so the numerous call sites in this
+     * builder read fluently, while the coercion policy itself lives in one shared place.
      */
     private function toBool(mixed $value): bool
     {
-        if (is_bool($value)) {
-            return $value;
-        }
-
-        if (is_int($value)) {
-            return $value !== 0;
-        }
-
-        if (is_string($value)) {
-            return in_array(strtolower($value), ['1', 'true', 'yes', 'on'], true);
-        }
-
-        return false;
+        return TypeCoercion::boolValue($value);
     }
 
     /**
