@@ -949,7 +949,6 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
         $updatedConfiguration['max_bytes'] = $this->configuration->streamMaxBytes() ?? -1;
         $updatedConfiguration['max_msgs'] = $this->configuration->streamMaxMessages() ?? -1;
         $updatedConfiguration['max_msgs_per_subject'] = $this->configuration->streamMaxMessagesPerSubject() ?? -1;
-        $updatedConfiguration['max_msg_size'] = $this->configuration->streamMaxMessageSize() ?? -1;
 
         // NATS refuses a stream whose duplicate window is larger than a finite max age. The window is
         // usually inherited from the live server config (the transport only writes it when
@@ -963,14 +962,23 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
             $updatedConfiguration['duplicate_window'] = $maxAgeNanoseconds;
         }
 
-        // max_consumers is deliberately NOT in the authoritative list above. NATS servers up to and
-        // including 2.11 refuse to change it on an existing stream ("stream configuration update can
-        // not change MaxConsumers"), so writing the unlimited sentinel here would make setup() fail
-        // permanently for anyone on the ^2.9 range this library supports whose stream was created with
-        // a consumer limit, and would silently clear that limit on 2.12 and newer. When
-        // stream_max_consumers is configured it arrives through $managedOptions and the array_merge
-        // above applies it; when it is not configured the server's own value is left untouched.
-
+        // max_consumers and max_msg_size are deliberately NOT in the authoritative list above, because
+        // this transport never wrote either field before these options existed. Both are therefore
+        // fields an operator may have set out of band on a live stream, and resetting them would be a
+        // behaviour change nobody asked for:
+        //
+        //  - max_consumers: NATS up to and including 2.11 refuses to change it at all, so writing the
+        //    unlimited sentinel makes setup() fail permanently for anyone on the ^2.9 range this
+        //    library supports whose stream has a consumer limit, and silently clears it on 2.12+.
+        //  - max_msg_size: mutable on every supported version, so it fails silently rather than
+        //    loudly - a stream capped at 1 MiB by an operator would be reset to unlimited on the next
+        //    setup() run, with nothing in the output to say so.
+        //
+        // Preservation works by echo, not by omission: a field left out of a STREAM.UPDATE payload is
+        // read as the Go zero value and reset (verified against nats-server), so the values survive
+        // only because getStream() returns them in $serverConfiguration and the array_merge above
+        // carries them through. When either option IS configured it arrives via $managedOptions and
+        // wins, which is what makes the options usable on an existing stream.
         if (array_key_exists('storage', $serverConfiguration)) {
             $updatedConfiguration['storage'] = $serverConfiguration['storage'];
         }

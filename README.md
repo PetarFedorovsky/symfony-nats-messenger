@@ -270,6 +270,8 @@ framework:
           stream_max_messages_per_subject: 1000 # Max number of messages retained per subject (null = unlimited)
           stream_max_message_size: 1048576  # Max size of a single message in bytes (null = unlimited).
                                             # Must be a positive integer, at most 2147483647.
+                                            # When left unset the transport keeps whatever limit the
+                                            # stream already has, rather than clearing it.
           stream_max_consumers: 10          # Max consumers allowed on the stream (null = unlimited)
                                             # ⚠️ NATS up to 2.11 refuses to change this on an existing
                                             # stream. When left unset the transport keeps whatever the

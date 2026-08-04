@@ -66,12 +66,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deployment made every `setup()` (and, with `auto_setup`, every `send()`/`get()`) fail with "replay
   policy can not be updated", unrecoverably. The transport now looks up the consumer first and sends the
   field only when the consumer does not exist yet or already uses the requested value.
-- **`stream_max_consumers` no longer breaks `setup()` on an existing stream.** The update payload used to
-  write `max_consumers` unconditionally, falling back to the unlimited sentinel `-1` when the option was
-  unset. NATS servers up to and including 2.11 reject any change to that field, so
-  `messenger:setup-transports` failed permanently for anyone whose stream had a consumer limit set
-  outside this transport, and on 2.12 and newer the limit was silently cleared. The field is now written
-  only when `stream_max_consumers` is configured; otherwise the server value is left untouched.
+- **`stream_max_consumers` and `stream_max_message_size` no longer clobber an existing stream.** The
+  update payload used to write `max_consumers` and `max_msg_size` unconditionally, falling back to the
+  unlimited sentinel `-1` when the options were unset. Neither field was written at all before these
+  options existed, so both are fields an operator may have set out of band on a live stream. For
+  `max_consumers` the consequence was severe: NATS up to and including 2.11 rejects any change to it, so
+  `messenger:setup-transports` failed permanently for anyone whose stream had a consumer limit, and on
+  2.12 and newer the limit was silently cleared. `max_msg_size` is mutable everywhere, so it failed
+  quietly instead: a stream capped at 1 MiB would be reset to unlimited on the next `setup()` with
+  nothing in the output to say so. Both are now written only when the corresponding option is
+  configured; otherwise the live server value is preserved.
 
 ## [5.0.0] - 2026-06-17
 

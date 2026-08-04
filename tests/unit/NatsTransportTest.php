@@ -1690,7 +1690,7 @@ final class NatsTransportTest extends TestCase
             ->willReturn(Future::complete($streamInfo));
         $jetStream->expects(self::once())
             ->method('updateStream')
-            ->with('test-stream', ['subjects' => ['test-topic'], 'storage' => 'file', 'num_replicas' => 1, 'max_age' => 0, 'max_bytes' => -1, 'max_msgs' => -1, 'max_msgs_per_subject' => -1, 'max_msg_size' => -1])
+            ->with('test-stream', ['subjects' => ['test-topic'], 'storage' => 'file', 'num_replicas' => 1, 'max_age' => 0, 'max_bytes' => -1, 'max_msgs' => -1, 'max_msgs_per_subject' => -1])
             ->willReturn(Future::complete());
         $jetStream->expects(self::once())
             ->method('addConsumer')
@@ -1841,7 +1841,7 @@ final class NatsTransportTest extends TestCase
             ->willReturn(Future::complete($streamInfo));
         $jetStream->expects(self::once())
             ->method('updateStream')
-            ->with('test-stream', ['subjects' => ['test-topic'], 'storage' => 'file', 'num_replicas' => 1, 'max_age' => 0, 'max_bytes' => -1, 'max_msgs' => -1, 'max_msgs_per_subject' => -1, 'max_msg_size' => -1])
+            ->with('test-stream', ['subjects' => ['test-topic'], 'storage' => 'file', 'num_replicas' => 1, 'max_age' => 0, 'max_bytes' => -1, 'max_msgs' => -1, 'max_msgs_per_subject' => -1])
             ->willReturn(Future::complete());
         $jetStream->expects(self::once())
             ->method('addConsumer')
@@ -2091,7 +2091,7 @@ final class NatsTransportTest extends TestCase
             ->willReturn(Future::complete($streamInfo));
         $jetStream->expects(self::once())
             ->method('updateStream')
-            ->with('test-stream', ['subjects' => ['test-topic'], 'storage' => 'file', 'num_replicas' => 1, 'max_age' => 0, 'max_bytes' => -1, 'max_msgs' => -1, 'max_msgs_per_subject' => -1, 'max_msg_size' => -1])
+            ->with('test-stream', ['subjects' => ['test-topic'], 'storage' => 'file', 'num_replicas' => 1, 'max_age' => 0, 'max_bytes' => -1, 'max_msgs' => -1, 'max_msgs_per_subject' => -1])
             ->willReturn(Future::complete());
         $jetStream->expects(self::once())
             ->method('addConsumer')
@@ -2137,7 +2137,7 @@ final class NatsTransportTest extends TestCase
             ->willReturn(Future::complete($streamInfo));
         $jetStream->expects(self::once())
             ->method('updateStream')
-            ->with('test-stream', ['subjects' => ['test-topic'], 'storage' => 'file', 'num_replicas' => 1, 'max_age' => 0, 'max_bytes' => -1, 'max_msgs' => -1, 'max_msgs_per_subject' => -1, 'max_msg_size' => -1])
+            ->with('test-stream', ['subjects' => ['test-topic'], 'storage' => 'file', 'num_replicas' => 1, 'max_age' => 0, 'max_bytes' => -1, 'max_msgs' => -1, 'max_msgs_per_subject' => -1])
             ->willReturn(Future::complete());
         $jetStream->expects(self::once())
             ->method('addConsumer')
@@ -3035,8 +3035,9 @@ final class NatsTransportTest extends TestCase
                     && ($options['max_bytes'] ?? null) === -1
                     && ($options['max_msgs'] ?? null) === -1
                     && ($options['max_msgs_per_subject'] ?? null) === -1
-                    && ($options['max_msg_size'] ?? null) === -1
-                    // Preserved, not reset: max_consumers is immutable on an existing stream.
+                    // Preserved, not reset: neither field was written by this transport before the
+                    // options existed, so an operator-set value must survive an upgrade.
+                    && ($options['max_msg_size'] ?? null) === 1_048_576
                     && ($options['max_consumers'] ?? null) === 3;
             }))
             ->willReturn(Future::complete());
@@ -3197,6 +3198,49 @@ final class NatsTransportTest extends TestCase
             )));
 
         $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, ['stream_retention' => 'workqueue']);
+        $transport->setJetStreamContext($jetStream);
+
+        $transport->setup();
+    }
+
+    public function testSetupUpdateAppliesExplicitlyConfiguredStreamMaxMessageSize(): void
+    {
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $streamInfo = new StreamInfo(
+            name: 'test-stream',
+            subjects: ['test-topic'],
+            raw: [
+                'config' => [
+                    'name' => 'test-stream',
+                    'subjects' => ['test-topic'],
+                    'storage' => 'file',
+                    'max_msg_size' => 1_048_576,
+                ],
+            ],
+        );
+        $jetStream->expects(self::once())
+            ->method('addStream')
+            ->willReturn(Future::error(new JetStreamException('already exists', 0)));
+        $jetStream->expects(self::once())
+            ->method('getStream')
+            ->willReturn(Future::complete($streamInfo));
+        $jetStream->expects(self::once())
+            ->method('updateStream')
+            ->with('test-stream', self::callback(static function (array $options): bool {
+                // Configured explicitly, so the operator's new value wins over the server's.
+                return ($options['max_msg_size'] ?? null) === 2048;
+            }))
+            ->willReturn(Future::complete());
+        $jetStream->expects(self::once())
+            ->method('addConsumer')
+            ->willReturn(Future::complete(new ConsumerInfo(
+                streamName: 'test-stream',
+                name: 'client',
+                push: false,
+                raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+            )));
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, ['stream_max_message_size' => 2048]);
         $transport->setJetStreamContext($jetStream);
 
         $transport->setup();
