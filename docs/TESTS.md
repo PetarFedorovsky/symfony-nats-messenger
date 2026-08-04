@@ -116,6 +116,14 @@ This document maps each feature of the Symfony NATS Messenger Bridge to the test
 | **Max messages per subject (update)** | Update existing stream preserves max messages per subject limit |
 | **Message eviction** | Stream evicts oldest messages when max messages limit is exceeded |
 
+### Auto Setup (`tests/functional/features/nats_auto_setup.feature`)
+
+| Feature | Scenarios |
+|---------|-----------|
+| **Lazy provisioning on first send** | Auto setup provisions the stream and consumer on the first send |
+| **Re-provisioning after a consumer is removed** | Auto setup recreates a consumer that was removed from JetStream |
+| **Disabled by default** | Without auto setup the stream is not provisioned implicitly |
+
 ### Consumer (`tests/functional/features/nats_consumer.feature`)
 
 | Feature | Scenarios |

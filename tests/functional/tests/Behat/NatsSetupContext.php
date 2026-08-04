@@ -1190,6 +1190,63 @@ class NatsSetupContext implements Context
     }
 
     /**
+     * @Given I have a messenger transport configured with auto setup enabled
+     */
+    public function iHaveAMessengerTransportConfiguredWithAutoSetupEnabled(): void
+    {
+        $this->writeAutoSetupTransportConfiguration(true);
+    }
+
+    /**
+     * @Given I have a messenger transport configured with auto setup disabled
+     */
+    public function iHaveAMessengerTransportConfiguredWithAutoSetupDisabled(): void
+    {
+        $this->writeAutoSetupTransportConfiguration(false);
+    }
+
+    /**
+     * Deletes the durable consumer behind the transport's back.
+     *
+     * Stands in for what NATS does on its own once a consumer has been idle for inactive_threshold.
+     *
+     * @When the durable consumer :consumerName is deleted from JetStream
+     */
+    public function theDurableConsumerIsDeletedFromJetStream(string $consumerName): void
+    {
+        $client = $this->createNatsClient();
+        $client->jetStream()->deleteConsumer($this->testStreamName, $consumerName)->await();
+    }
+
+    /**
+     * Asserts the stream exists without going through the setup command.
+     *
+     * @Then the NATS stream should exist
+     */
+    public function theNatsStreamShouldExist(): void
+    {
+        $this->verifyStreamExists();
+    }
+
+    /**
+     * @Then the NATS stream should not exist
+     */
+    public function theNatsStreamShouldNotExist(): void
+    {
+        $client = $this->createNatsClient();
+
+        try {
+            $client->jetStream()->getStream($this->testStreamName)->await();
+        } catch (\Exception) {
+            return;
+        }
+
+        throw new \RuntimeException(
+            sprintf('Stream "%s" exists, but no provisioning should have happened.', $this->testStreamName)
+        );
+    }
+
+    /**
      * @Given I have a messenger transport configured with max messages per subject of :maxMessages
      */
     public function iHaveAMessengerTransportConfiguredWithMaxMessagesPerSubject(int $maxMessages): void
@@ -1644,6 +1701,25 @@ class NatsSetupContext implements Context
         }
 
         throw new \RuntimeException('NATS server did not become ready within 30 seconds');
+    }
+
+    /**
+     * Writes a transport configuration whose only non-default option is auto_setup.
+     *
+     * Kept free of stream_max_age and friends so the scenarios exercise provisioning itself rather
+     * than any particular stream setting.
+     */
+    private function writeAutoSetupTransportConfiguration(bool $enabled): void
+    {
+        $configContent = sprintf(
+            "framework:\n    messenger:\n        transports:\n            test_transport:\n                dsn: 'nats-jetstream://admin:password@localhost:4222/%s/%s?auto_setup=%s'\n                serializer: 'messenger.transport.native_php_serializer'\n        routing:\n            'App\\Async\\TestMessage': test_transport\n",
+            $this->testStreamName,
+            $this->testSubject,
+            $enabled ? 'true' : 'false',
+        );
+
+        file_put_contents(__DIR__ . '/../../config/packages/test_messenger.yaml', $configContent);
+        $this->resetSymfonyCache();
     }
 
     private function createNatsClient(): NatsClient
