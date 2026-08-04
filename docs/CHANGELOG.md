@@ -57,15 +57,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payload now clamps the window the same way the server does when a stream is created.
 - **`auto_setup` now re-provisions when JetStream reports the stream or consumer as missing.** The
   one-shot flag was latched for the lifetime of the transport object, so a consumer that NATS removed
-  after `inactive_threshold` left the worker pulling from a consumer that no longer existed and
-  reporting an empty queue forever. A 404 from the pull now triggers one re-provisioning attempt and a
-  single retry, and `close()` clears the flag so a reopened connection verifies provisioning again.
-  Without `auto_setup` the 404 is still treated as an empty result, unchanged.
+  after `inactive_threshold` left the worker unable to pull. A missing resource now triggers one
+  re-provisioning attempt and a single retry, and `close()` clears the flag so a reopened connection
+  verifies provisioning again. The statuses that count as "missing" are 404, 409 and **503**: a deleted
+  durable leaves nothing subscribed to answer the pull, which surfaces as 503, not 404. Without
+  `auto_setup` the historical contract is unchanged: 404 and 408 read as an empty queue and everything
+  else propagates.
+  Note that a replacement consumer starts from `deliver_policy=all`, so it redelivers everything the
+  stream still retains, including acknowledged messages under the default `limits` retention. See the
+  warning in the README: this is inherent to losing a durable consumer, not to `auto_setup`.
+- **`stream_deny_delete` and `stream_deny_purge` are never cancelled on an existing stream.** NATS can
+  turn both on but never off, so a stream that already denies deletes or purges would fail every
+  `setup()` once the option was present as `false` - which is the value the README itself shows. The
+  update path now keeps the server's value for those two. `stream_allow_direct` and
+  `stream_allow_rollup_headers` were measured to be freely mutable and stay changeable.
+- **The four tri-state stream flags reject unrecognized values.** `stream_deny_delete=maybe` used to
+  coerce to `false` and be written to the server as a deliberate instruction; it is now a configuration
+  error, consistent with the enum-backed options.
 - **`replay_policy` no longer breaks `setup()` on an existing durable consumer.** NATS refuses to change
   a consumer's replay policy, in both directions, so adding `replay_policy` to the DSN of a running
   deployment made every `setup()` (and, with `auto_setup`, every `send()`/`get()`) fail with "replay
-  policy can not be updated", unrecoverably. The transport now looks up the consumer first and sends the
-  field only when the consumer does not exist yet or already uses the requested value.
+  policy can not be updated", unrecoverably. Removing the option again did not help: the omitted field
+  reads as a change back to the server default and is rejected just the same. The transport now looks
+  the consumer up and always writes its existing replay policy, applying the configured value only to a
+  consumer that does not exist yet.
 - **`stream_max_consumers` and `stream_max_message_size` no longer clobber an existing stream.** The
   update payload used to write `max_consumers` and `max_msg_size` unconditionally, falling back to the
   unlimited sentinel `-1` when the options were unset. Neither field was written at all before these

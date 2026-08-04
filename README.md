@@ -296,8 +296,10 @@ framework:
                                             # At most 4096 characters.
 
           # Stream Access Policy (null = leave the server default untouched)
-          stream_deny_delete: false         # Deny message deletion from the stream
-          stream_deny_purge: false          # Deny stream purge
+          stream_deny_delete: false         # Deny message deletion from the stream.
+                                            # ⚠️ One-way: NATS can turn this on but never off, so once
+                                            # a stream denies deletes, setting false here is ignored.
+          stream_deny_purge: false          # Deny stream purge (one-way, exactly like deny_delete)
           stream_allow_direct: false        # Allow direct get access
           stream_allow_rollup_headers: false # Allow Nats-Rollup headers
 
@@ -722,6 +724,14 @@ again only if JetStream reports the stream or consumer as missing during a pull 
 removed an idle consumer that hit `inactive_threshold`), or after `close()`. It defaults to **`false`**,
 so unless you opt in, provisioning stays explicit (no hidden stream/consumer creation on the hot path).
 
+> ⚠️ **Re-provisioning replays the stream.** A durable consumer holds the acknowledgement state, so when
+> one is lost that state is gone with it. The replacement is created with `deliver_policy=all` and will
+> therefore redeliver every message the stream still retains, including messages that were already
+> acknowledged. Under the default `limits` retention that means the whole stream, so make your handlers
+> idempotent before combining `auto_setup` with a short `inactive_threshold`. `workqueue` retention does
+> not have this problem, because acknowledged messages are removed from the stream. This is inherent to
+> losing a durable consumer, not to `auto_setup`: a restarted worker rebuilds the consumer the same way.
+
 ```yaml
 framework:
   messenger:
@@ -738,10 +748,18 @@ framework:
 > because the missing stream surfaces as a 404 that triggers re-provisioning.
 
 > **Note on `replay_policy`:** the replay policy of a durable consumer is fixed when the consumer is
-> created. NATS rejects an update that changes it, in both directions, so removing the option again does
-> not undo it either. The transport therefore sends `replay_policy` only when the consumer does not exist
-> yet or already uses the requested value; changing it on a running deployment is a no-op until you
-> delete the consumer and let setup recreate it.
+> created. NATS rejects an update that changes it, in both directions: once a consumer exists as
+> `original`, removing the option again does not restore `instant` either, because the server reads the
+> omitted field as a change back to its default. The transport therefore always writes the existing
+> consumer's own replay policy and applies the configured one only to a consumer that does not exist
+> yet. Changing it on a running deployment is a no-op until you delete the consumer and let setup
+> recreate it.
+
+> **Note on the deny flags:** `stream_deny_delete` and `stream_deny_purge` can be switched on but never
+> off. NATS rejects an update that cancels either one, so on a stream that already denies deletes or
+> purges the transport keeps the server's value and a `false` in your configuration is ignored. Recreate
+> the stream to lift a deny. `stream_allow_direct` and `stream_allow_rollup_headers` are freely mutable
+> in both directions.
 
 > **Note on `stream_max_consumers`:** NATS servers up to and including 2.11 also refuse to change
 > `max_consumers` on an existing stream. The transport therefore writes it only when you set the option

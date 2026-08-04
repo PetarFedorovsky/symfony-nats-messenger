@@ -18,8 +18,13 @@ Feature: NATS Auto Setup
     Then the NATS stream should exist
     And the NATS stream should have a consumer named "client"
 
+  # This covers the worker-restart path: messenger:consume starts a fresh process, so a new transport
+  # instance provisions on its first pull. The in-process recovery path, where the SAME instance sees
+  # the 503 that a deleted consumer produces and re-provisions, is covered by the unit tests
+  # (testAutoSetupReprovisionsForEveryMissingResourceStatus) because Behat drives the transport through
+  # a separate console process and cannot observe a single instance across the deletion.
   @auto-setup
-  Scenario: Auto setup recreates a consumer that was removed from JetStream
+  Scenario: A worker started after the consumer was removed re-provisions it
     Given I have a messenger transport configured with auto setup enabled
     When I send 3 messages to the transport
     And the durable consumer "client" is deleted from JetStream

@@ -1301,6 +1301,31 @@ final class NatsTransportConfigurationBuilderTest extends TestCase
         self::assertSame(4096, strlen((string) $config->streamDescription()));
     }
 
+    public function testBuildWithUnrecognizedTriStateBooleanThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("Invalid stream_deny_delete option 'maybe'.");
+
+        // Without validation this would coerce to false and be sent to the server as a deliberate
+        // instruction to allow deletes, rather than being reported as the typo it is.
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, ['stream_deny_delete' => 'maybe']);
+    }
+
+    public function testBuildAcceptsEveryRecognizedBooleanTokenForTriStateFlags(): void
+    {
+        $config = (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, [
+            'stream_deny_delete' => 'on',
+            'stream_deny_purge' => 'off',
+            'stream_allow_direct' => '1',
+            'stream_allow_rollup_headers' => 'no',
+        ]);
+
+        self::assertTrue($config->streamDenyDelete());
+        self::assertFalse($config->streamDenyPurge());
+        self::assertTrue($config->streamAllowDirect());
+        self::assertFalse($config->streamAllowRollupHeaders());
+    }
+
     public function testBuildParsesNewOptionsFromDsnQuery(): void
     {
         $config = (new NatsTransportConfigurationBuilder())->build(

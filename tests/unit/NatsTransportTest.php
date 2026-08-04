@@ -1228,7 +1228,7 @@ final class NatsTransportTest extends TestCase
         $transport->setup();
     }
 
-    public function testSetupSkipsReplayPolicyWhenExistingConsumerUsesADifferentOne(): void
+    public function testSetupPreservesTheExistingConsumerReplayPolicyOverTheConfiguredOne(): void
     {
         $jetStream = $this->createMock(JetStreamContext::class);
         $jetStream->expects(self::once())
@@ -1251,9 +1251,9 @@ final class NatsTransportTest extends TestCase
         $jetStream->expects(self::once())
             ->method('addConsumer')
             ->with('test-stream', self::callback(static function (ConsumerConfiguration $configuration): bool {
-                // NATS would reject an update that changes the replay policy, so the field must be
-                // absent from the payload entirely rather than sent with the requested value.
-                return !array_key_exists('replay_policy', $configuration->toArray());
+                // NATS rejects any change to a durable's replay policy, so the live consumer's own
+                // value is sent back rather than the configured one.
+                return ($configuration->toArray()['replay_policy'] ?? null) === 'instant';
             }))
             ->willReturn(Future::complete(new ConsumerInfo(
                 streamName: 'test-stream',
@@ -1305,13 +1305,14 @@ final class NatsTransportTest extends TestCase
         $transport->setup();
     }
 
-    public function testSetupTreatsConsumerWithoutReplayPolicyAsInstant(): void
+    public function testSetupOmitsReplayPolicyWhenTheExistingConsumerReportsNone(): void
     {
         $jetStream = $this->createMock(JetStreamContext::class);
         $jetStream->expects(self::once())
             ->method('addStream')
             ->willReturn(Future::complete());
-        // Server reported no replay_policy at all, which means it is on the default 'instant'.
+        // Server reported no replay_policy at all, so it is on its default and the field is left out
+        // rather than sent to a server that may predate it.
         $jetStream->expects(self::once())
             ->method('getConsumer')
             ->willReturn(Future::complete(new ConsumerInfo(
@@ -1323,7 +1324,7 @@ final class NatsTransportTest extends TestCase
         $jetStream->expects(self::once())
             ->method('addConsumer')
             ->with('test-stream', self::callback(static function (ConsumerConfiguration $configuration): bool {
-                return ($configuration->toArray()['replay_policy'] ?? null) === 'instant';
+                return !array_key_exists('replay_policy', $configuration->toArray());
             }))
             ->willReturn(Future::complete(new ConsumerInfo(
                 streamName: 'test-stream',
@@ -1557,12 +1558,13 @@ final class NatsTransportTest extends TestCase
         $jetStream->expects(self::exactly(2))
             ->method('addConsumer')
             ->willReturn(Future::complete($consumerInfo));
-        // NATS removed the idle consumer, so the first pull 404s; the retry after re-provisioning
-        // succeeds and simply finds no messages.
+        // A deleted durable consumer leaves nothing subscribed to answer the pull, which the client
+        // reports as 503 (verified against nats-server 2.10.29 and 2.14.2) - NOT 404. The retry after
+        // re-provisioning succeeds and simply finds no messages.
         $jetStream->expects(self::exactly(2))
             ->method('fetchBatch')
             ->willReturnOnConsecutiveCalls(
-                Future::error(new JetStreamException('consumer not found', 404)),
+                Future::error(new JetStreamException('JetStream pull request ended with status 503', 503)),
                 Future::complete([]),
             );
 
@@ -1638,6 +1640,98 @@ final class NatsTransportTest extends TestCase
         $this->expectExceptionMessage('backend unavailable');
 
         iterator_to_array($transport->get());
+    }
+
+    #[DataProvider('missingResourceStatusProvider')]
+    public function testAutoSetupReprovisionsForEveryMissingResourceStatus(int $status): void
+    {
+        $consumerInfo = new ConsumerInfo(
+            streamName: 'test-stream',
+            name: 'client',
+            push: false,
+            raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+        );
+
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->expects(self::exactly(2))->method('addStream')->willReturn(Future::complete());
+        $jetStream->expects(self::exactly(2))->method('addConsumer')->willReturn(Future::complete($consumerInfo));
+        $jetStream->expects(self::exactly(2))
+            ->method('fetchBatch')
+            ->willReturnOnConsecutiveCalls(
+                Future::error(new JetStreamException('missing', $status)),
+                Future::complete([]),
+            );
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, ['auto_setup' => true]);
+        $transport->setJetStreamContext($jetStream);
+
+        self::assertSame([], array_values(iterator_to_array($transport->get())));
+    }
+
+    /**
+     * @return iterable<string, array{int}>
+     */
+    public static function missingResourceStatusProvider(): iterable
+    {
+        yield '404 stream or consumer lookup' => [404];
+        yield '409 consumer deleted mid-pull' => [409];
+        yield '503 nothing answers the pull' => [503];
+    }
+
+    public function testGetStillPropagates503WhenAutoSetupIsDisabled(): void
+    {
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->expects(self::never())->method('addStream');
+        $jetStream->expects(self::once())
+            ->method('fetchBatch')
+            ->willReturn(Future::error(new JetStreamException('JetStream pull request ended with status 503', 503)));
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, []);
+        $transport->setJetStreamContext($jetStream);
+
+        // Historical contract for the default configuration: only 404 and 408 read as an empty queue,
+        // anything else surfaces so the operator sees it.
+        $this->expectException(JetStreamException::class);
+
+        iterator_to_array($transport->get());
+    }
+
+    public function testSetupPreservesAnOriginalReplayPolicyWhenTheOptionIsRemoved(): void
+    {
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->expects(self::once())->method('addStream')->willReturn(Future::complete());
+        $jetStream->expects(self::once())
+            ->method('getConsumer')
+            ->willReturn(Future::complete(new ConsumerInfo(
+                streamName: 'test-stream',
+                name: 'client',
+                push: false,
+                raw: ['config' => [
+                    'ack_policy' => 'explicit',
+                    'deliver_policy' => 'all',
+                    'filter_subject' => 'test-topic',
+                    'replay_policy' => 'original',
+                ]],
+            )));
+        $jetStream->expects(self::once())
+            ->method('addConsumer')
+            ->with('test-stream', self::callback(static function (ConsumerConfiguration $configuration): bool {
+                // Omitting the field would read as a change back to the server default and be
+                // rejected, so the consumer's own 'original' has to be echoed even though the DSN no
+                // longer mentions replay_policy at all.
+                return ($configuration->toArray()['replay_policy'] ?? null) === 'original';
+            }))
+            ->willReturn(Future::complete(new ConsumerInfo(
+                streamName: 'test-stream',
+                name: 'client',
+                push: false,
+                raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+            )));
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, []);
+        $transport->setJetStreamContext($jetStream);
+
+        $transport->setup();
     }
 
     public function testCloseResetsAutoSetupSoTheNextOperationProvisionsAgain(): void
@@ -3148,6 +3242,56 @@ final class NatsTransportTest extends TestCase
             )));
 
         $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, []);
+        $transport->setJetStreamContext($jetStream);
+
+        $transport->setup();
+    }
+
+    public function testSetupUpdateNeverCancelsAnExistingDenyFlag(): void
+    {
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $streamInfo = new StreamInfo(
+            name: 'test-stream',
+            subjects: ['test-topic'],
+            raw: [
+                'config' => [
+                    'name' => 'test-stream',
+                    'subjects' => ['test-topic'],
+                    'storage' => 'file',
+                    'deny_delete' => true,
+                    'deny_purge' => true,
+                    'allow_direct' => true,
+                ],
+            ],
+        );
+        $jetStream->expects(self::once())
+            ->method('addStream')
+            ->willReturn(Future::error(new JetStreamException('already exists', 0)));
+        $jetStream->expects(self::once())->method('getStream')->willReturn(Future::complete($streamInfo));
+        $jetStream->expects(self::once())
+            ->method('updateStream')
+            ->with('test-stream', self::callback(static function (array $options): bool {
+                // NATS rejects an update that cancels either deny, so the DSN's false is ignored for
+                // those two. allow_direct is freely mutable, so the configured false must win there.
+                return ($options['deny_delete'] ?? null) === true
+                    && ($options['deny_purge'] ?? null) === true
+                    && ($options['allow_direct'] ?? null) === false;
+            }))
+            ->willReturn(Future::complete());
+        $jetStream->expects(self::once())
+            ->method('addConsumer')
+            ->willReturn(Future::complete(new ConsumerInfo(
+                streamName: 'test-stream',
+                name: 'client',
+                push: false,
+                raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+            )));
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, [
+            'stream_deny_delete' => false,
+            'stream_deny_purge' => false,
+            'stream_allow_direct' => false,
+        ]);
         $transport->setJetStreamContext($jetStream);
 
         $transport->setup();

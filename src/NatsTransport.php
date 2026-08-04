@@ -210,31 +210,11 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
 
         try {
             $messages = $this->fetchBatchMessages();
-        } catch (JetStreamException $e) {
-            if ($e->getCode() === 408) {
+        } catch (JetStreamException $exception) {
+            $messages = $this->recoverFromFetchFailure($exception);
+
+            if ($messages === null) {
                 return [];
-            }
-
-            if ($e->getCode() !== 404) {
-                throw $e;
-            }
-
-            // 404 means the stream or the durable consumer is not there. When auto_setup owns
-            // provisioning, recreate it and try once more instead of reporting an empty batch: a
-            // consumer that NATS removed after inactive_threshold would otherwise leave this worker
-            // polling a queue that no longer exists, silently and forever.
-            if (!$this->reprovisionForAutoSetup()) {
-                return [];
-            }
-
-            try {
-                $messages = $this->fetchBatchMessages();
-            } catch (JetStreamException $retryException) {
-                if ($retryException->getCode() === 404 || $retryException->getCode() === 408) {
-                    return [];
-                }
-
-                throw $retryException;
             }
         }
 
@@ -511,8 +491,8 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
                 $consumerConfiguration->inactiveThreshold($inactiveThresholdMs);
             }
 
-            $replayPolicy = $this->configuration->replayPolicy();
-            if ($replayPolicy !== null && $this->canApplyReplayPolicy($replayPolicy)) {
+            $replayPolicy = $this->resolveReplayPolicy();
+            if ($replayPolicy !== null) {
                 $consumerConfiguration->replayPolicy($replayPolicy);
             }
 
@@ -581,6 +561,55 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
         $this->autoSetupIfEnabled();
 
         return true;
+    }
+
+    /**
+     * Decides what a failed batch pull means, re-provisioning once when auto_setup owns the resources.
+     *
+     * Returns the messages from a successful retry, or null when the batch should be reported as empty.
+     * Anything it cannot account for is rethrown.
+     *
+     * The status codes matter and are easy to get wrong. A deleted durable consumer does NOT produce a
+     * 404: nothing is subscribed to answer the pull request, so the client reports 503. Measured
+     * directly against nats-server 2.10.29 and 2.14.2 by deleting the consumer and pulling:
+     * "JetStream pull request ended with status 503". 409 is what a consumer deleted mid-pull reports,
+     * and 404 comes from the stream-level lookup. All three mean the same thing to this transport: the
+     * consumer or stream it pulls from is not there.
+     *
+     * @return list<NatsMessage>|null
+     */
+    private function recoverFromFetchFailure(JetStreamException $exception): ?array
+    {
+        $code = $exception->getCode();
+
+        // A pull that timed out simply found no messages.
+        if ($code === 408) {
+            return null;
+        }
+
+        $missingResource = $code === 404 || $code === 409 || $code === 503;
+
+        if ($missingResource && $this->reprovisionForAutoSetup()) {
+            try {
+                return $this->fetchBatchMessages();
+            } catch (JetStreamException $retryException) {
+                // One re-provisioning attempt and one retry. If the resource is still missing, report
+                // an empty batch rather than looping; anything else is a real error.
+                if ($retryException->getCode() === 404 || $retryException->getCode() === 408) {
+                    return null;
+                }
+
+                throw $retryException;
+            }
+        }
+
+        // Without auto_setup the operator owns provisioning, so the historical contract stands
+        // unchanged: a missing consumer reads as an empty queue, everything else propagates.
+        if ($code === 404) {
+            return null;
+        }
+
+        throw $exception;
     }
 
     /**
@@ -690,33 +719,34 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
     }
 
     /**
-     * Tells whether the configured replay policy can safely be written to the durable consumer.
+     * Returns the replay policy to write to the durable consumer, or null to leave the field out.
      *
      * NATS refuses to change the replay policy of an existing durable consumer ("replay policy can not
-     * be updated"), and it refuses in both directions: once a consumer is created with `original`,
-     * dropping the option again does not restore `instant` either, because the server then sees a
-     * change back to its default. A mismatch is therefore not repairable through configuration - the
-     * consumer has to be deleted and recreated.
+     * be updated"), and it refuses in BOTH directions. Once a consumer exists as `original`, dropping
+     * the option again does not restore `instant`: the transport would then omit the field, the server
+     * would read that as a change back to its default, and reject it just the same. Verified against
+     * nats-server 2.10 and 2.14, where removing the option from a consumer created as `original` fails
+     * every subsequent setup() until the consumer is deleted.
      *
-     * To keep setup() idempotent on a live deployment, the field is sent only when the consumer does
-     * not exist yet or already has the requested value. Changing replay_policy in the DSN of a running
-     * deployment is a no-op until the consumer is recreated, which mirrors how stream_retention is
-     * handled on the stream update path.
+     * So the existing consumer's own value always wins, whatever the DSN says. The configured option
+     * applies only to a consumer that does not exist yet, exactly like stream_retention applies only to
+     * a stream that does not exist yet. That keeps setup() idempotent no matter how the option is
+     * changed on a live deployment.
      */
-    private function canApplyReplayPolicy(ReplayPolicy $replayPolicy): bool
+    private function resolveReplayPolicy(): ?ReplayPolicy
     {
         $existingConsumer = $this->getExistingConsumer();
         if ($existingConsumer === null) {
-            return true;
+            return $this->configuration->replayPolicy();
         }
 
         /** @var array<string, mixed> $config */
         $config = is_array($existingConsumer->raw['config'] ?? null) ? $existingConsumer->raw['config'] : [];
+        $currentPolicy = $config['replay_policy'] ?? null;
 
-        // A consumer that reports no replay_policy at all is on the server default, which is 'instant'.
-        $currentPolicy = $config['replay_policy'] ?? ReplayPolicy::Instant->value;
-
-        return $currentPolicy === $replayPolicy->value;
+        // A consumer reporting no replay policy is on the server default, so leaving the field out
+        // matches it and avoids sending a value an older server might not understand.
+        return $currentPolicy === null ? null : ReplayPolicy::tryFrom(TypeCoercion::stringValue($currentPolicy));
     }
 
     /**
@@ -989,6 +1019,19 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
         // change it. buildManagedStreamConfiguration() sets retention only at creation time.
         if (array_key_exists('retention', $serverConfiguration)) {
             $updatedConfiguration['retention'] = $serverConfiguration['retention'];
+        }
+
+        // deny_delete and deny_purge can be switched on but never off: NATS rejects an update that
+        // cancels either one ("stream configuration update can not cancel deny message deletes" /
+        // "... can not cancel deny purge"), on every supported version. Since the README shows
+        // stream_deny_delete: false as a sample value, a stream that has the flag set would otherwise
+        // fail every setup() from then on. Keep the server's value whenever it is already denied.
+        // allow_direct and allow_rollup_hdrs were measured to be freely mutable in both directions, so
+        // they stay with the array_merge above and remain changeable.
+        foreach (['deny_delete', 'deny_purge'] as $oneWayFlag) {
+            if (($serverConfiguration[$oneWayFlag] ?? false) === true) {
+                $updatedConfiguration[$oneWayFlag] = true;
+            }
         }
 
         // Preserve the existing replica count unless stream_replicas was explicitly configured.

@@ -275,6 +275,7 @@ final class NatsTransportConfigurationBuilder
         // unmarshal error instead of a configuration error.
         $this->assertNotExceedingInt32($configuration, TransportOption::STREAM_MAX_MESSAGE_SIZE);
         $this->assertStreamDescriptionLength($configuration);
+        $this->assertTriStateBooleans($configuration);
         $this->assertNonNegativeNumber($configuration, TransportOption::NAK_DELAY);
         $this->assertPositiveNumber($configuration, TransportOption::ACK_WAIT);
         $this->assertPositiveNumber($configuration, TransportOption::MAX_DELIVER, true);
@@ -500,6 +501,45 @@ final class NatsTransportConfigurationBuilder
                 self::MAX_STREAM_DESCRIPTION_LENGTH,
                 strlen($description),
             ));
+        }
+    }
+
+    /**
+     * Validates the four tri-state stream policy flags.
+     *
+     * These differ from the always-on boolean options (scheduled_messages, ack_sync, auto_setup) in
+     * that an unset value means "leave the server alone" while a set value is written to the stream.
+     * That makes silent coercion dangerous: without this check `stream_deny_delete=maybe` would coerce
+     * to false and be sent to the server as an explicit false, which reads as a deliberate instruction
+     * rather than a typo. Unrecognized values are rejected instead, matching how the enum-backed
+     * options behave.
+     *
+     * @param array<string, mixed> $configuration Merged configuration array
+     */
+    private function assertTriStateBooleans(array $configuration): void
+    {
+        $flags = [
+            TransportOption::STREAM_DENY_DELETE,
+            TransportOption::STREAM_DENY_PURGE,
+            TransportOption::STREAM_ALLOW_DIRECT,
+            TransportOption::STREAM_ALLOW_ROLLUP_HEADERS,
+        ];
+
+        foreach ($flags as $flag) {
+            $value = $configuration[$flag->value] ?? null;
+            if ($value === null || is_bool($value)) {
+                continue;
+            }
+
+            // Round-trip through both defaults: a value the coercion policy actually recognizes gives
+            // the same answer either way, an unrecognized one does not.
+            if (TypeCoercion::boolValue($value, false) !== TypeCoercion::boolValue($value, true)) {
+                throw new InvalidArgumentException(sprintf(
+                    "Invalid %s option '%s'. Expected a boolean: 'true'/'false', '1'/'0', 'yes'/'no' or 'on'/'off'.",
+                    $flag->value,
+                    TypeCoercion::stringValue($value, '(non-scalar)'),
+                ));
+            }
         }
     }
 
