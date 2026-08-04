@@ -125,12 +125,54 @@ final class TypeCoercionTest extends TestCase
         self::assertSame(0, TypeCoercion::secondsToMs('not-a-number'));
     }
 
+    #[DataProvider('boolValueProvider')]
+    public function testBoolValue(mixed $value, bool $default, bool $expected): void
+    {
+        self::assertSame($expected, TypeCoercion::boolValue($value, $default));
+    }
+
+    /**
+     * @return iterable<string, array{mixed, bool, bool}>
+     */
+    public static function boolValueProvider(): iterable
+    {
+        yield 'true passes through' => [true, false, true];
+        yield 'false passes through' => [false, true, false];
+        yield 'non-zero int is true' => [1, false, true];
+        yield 'negative int is true' => [-3, false, true];
+        yield 'zero int is false' => [0, true, false];
+        yield 'truthy token 1' => ['1', false, true];
+        yield 'truthy token true' => ['true', false, true];
+        yield 'truthy token yes' => ['yes', false, true];
+        yield 'truthy token on' => ['on', false, true];
+        yield 'truthy token is case-insensitive' => ['TRUE', false, true];
+        yield 'falsy token 0' => ['0', true, false];
+        yield 'falsy token false' => ['false', true, false];
+        yield 'falsy token no' => ['no', true, false];
+        yield 'falsy token off' => ['off', true, false];
+        yield 'falsy token is case-insensitive' => ['Off', true, false];
+        // Neither list matches, so the caller's default decides.
+        yield 'unrecognized string falls back to default false' => ['maybe', false, false];
+        yield 'unrecognized string falls back to default true' => ['maybe', true, true];
+        yield 'empty string falls back to default' => ['', true, true];
+        yield 'null falls back to default' => [null, true, true];
+        yield 'array falls back to default' => [['x'], true, true];
+        yield 'object falls back to default' => [new \stdClass(), false, false];
+    }
+
+    public function testBoolValueDefaultIsFalseWhenOmitted(): void
+    {
+        self::assertFalse(TypeCoercion::boolValue('maybe'));
+        self::assertFalse(TypeCoercion::boolValue(null));
+    }
+
     public function testMethodsAreStaticAndPure(): void
     {
         // Calling repeatedly with the same input yields the same output (no state).
         self::assertSame(TypeCoercion::intValue('7'), TypeCoercion::intValue('7'));
         self::assertSame(TypeCoercion::floatValue('7.5'), TypeCoercion::floatValue('7.5'));
         self::assertSame(TypeCoercion::stringValue(7), TypeCoercion::stringValue(7));
+        self::assertSame(TypeCoercion::boolValue('yes'), TypeCoercion::boolValue('yes'));
         self::assertSame(TypeCoercion::secondsToMs('2.5'), TypeCoercion::secondsToMs('2.5'));
     }
 }

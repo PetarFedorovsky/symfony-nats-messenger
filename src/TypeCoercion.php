@@ -82,9 +82,12 @@ final class TypeCoercion
     /**
      * Coerces a mixed value to bool.
      *
-     * Recognizes bool as-is, int (0 = false, non-zero = true), and the truthy string tokens
-     * '1', 'true', 'yes', 'on' (case-insensitive). Returns $default for every other value - arrays,
-     * objects, null, and unrecognized strings - so a stray option can never accidentally read as true.
+     * Recognizes bool as-is, int (0 = false, non-zero = true), the truthy string tokens '1', 'true',
+     * 'yes', 'on' and the falsy string tokens '0', 'false', 'no', 'off' (all case-insensitive).
+     * Returns $default for everything else: arrays, objects, null, and strings that match neither list.
+     *
+     * The default default is false, so an unrecognized value never accidentally reads as true. Callers
+     * that need an option to stay enabled unless it is explicitly turned off pass $default = true.
      */
     public static function boolValue(mixed $value, bool $default = false): bool
     {
@@ -97,7 +100,15 @@ final class TypeCoercion
         }
 
         if (is_string($value)) {
-            return in_array(strtolower($value), ['1', 'true', 'yes', 'on'], true);
+            $normalized = strtolower($value);
+
+            if (in_array($normalized, ['1', 'true', 'yes', 'on'], true)) {
+                return true;
+            }
+
+            if (in_array($normalized, ['0', 'false', 'no', 'off'], true)) {
+                return false;
+            }
         }
 
         return $default;
