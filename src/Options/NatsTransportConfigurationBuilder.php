@@ -30,6 +30,9 @@ final class NatsTransportConfigurationBuilder
     /** Default NATS server port when not specified in DSN. */
     private const DEFAULT_NATS_PORT = 4222;
 
+    /** Longest stream description NATS accepts. */
+    private const MAX_STREAM_DESCRIPTION_LENGTH = 4096;
+
     /**
      * Default option values.
      *
@@ -258,10 +261,20 @@ final class NatsTransportConfigurationBuilder
         $this->assertNonNegativeNumber($configuration, TransportOption::STREAM_MAX_BYTES, true);
         $this->assertNonNegativeNumber($configuration, TransportOption::STREAM_MAX_MESSAGES, true);
         $this->assertNonNegativeNumber($configuration, TransportOption::STREAM_MAX_MESSAGES_PER_SUBJECT, true);
-        $this->assertNonNegativeNumber($configuration, TransportOption::STREAM_MAX_MESSAGE_SIZE, true);
+        // These three default to null, and null already means "unlimited" / "server default", so an
+        // explicit 0 has no meaning to express: NATS reads 0 as unlimited for max_msg_size and
+        // substitutes its own 2-minute default for a 0 duplicate window, both of which look like the
+        // option was ignored. Requiring a positive value keeps the whole null-defaulted family
+        // consistent with stream_max_consumers, max_ack_pending and max_deliver. stream_max_age is the
+        // deliberate exception: it defaults to 0 and documents 0 as unlimited.
+        $this->assertPositiveNumber($configuration, TransportOption::STREAM_MAX_MESSAGE_SIZE, true);
         $this->assertPositiveNumber($configuration, TransportOption::STREAM_MAX_CONSUMERS, true);
         $this->assertPositiveNumber($configuration, TransportOption::STREAM_REPLICAS, true);
-        $this->assertNonNegativeNumber($configuration, TransportOption::STREAM_DUPLICATE_WINDOW, true);
+        $this->assertPositiveNumber($configuration, TransportOption::STREAM_DUPLICATE_WINDOW, true);
+        // max_msg_size is an int32 on the server, so a larger value fails inside setup() with a raw Go
+        // unmarshal error instead of a configuration error.
+        $this->assertNotExceedingInt32($configuration, TransportOption::STREAM_MAX_MESSAGE_SIZE);
+        $this->assertStreamDescriptionLength($configuration);
         $this->assertNonNegativeNumber($configuration, TransportOption::NAK_DELAY);
         $this->assertPositiveNumber($configuration, TransportOption::ACK_WAIT);
         $this->assertPositiveNumber($configuration, TransportOption::MAX_DELIVER, true);
@@ -444,6 +457,57 @@ final class NatsTransportConfigurationBuilder
         $number = $this->toNumber($value, $option);
         if ($number < 0 || ($integerOnly && floor($number) !== $number)) {
             throw new InvalidArgumentException(sprintf('The %s option must be a non-negative%s value.', $option->value, $integerOnly ? ' integer' : ''));
+        }
+    }
+
+    /**
+     * Validates that an option fits in a signed 32-bit integer.
+     *
+     * Some JetStream config fields are int32 on the server. A larger number is rejected by the Go JSON
+     * decoder with "json: cannot unmarshal number ... into Go struct field ... of type int32", which
+     * surfaces from setup() and says nothing about which option caused it.
+     *
+     * @param array<string, mixed> $configuration Merged configuration array
+     * @param TransportOption      $option        The option key to validate
+     */
+    private function assertNotExceedingInt32(array $configuration, TransportOption $option): void
+    {
+        $value = $configuration[$option->value] ?? null;
+        if ($value === null) {
+            return;
+        }
+
+        $number = $this->toNumber($value, $option);
+        if ($number > 2147483647) {
+            throw new InvalidArgumentException(sprintf(
+                'The %s option must not exceed 2147483647: NATS stores it as a 32-bit integer.',
+                $option->value,
+            ));
+        }
+    }
+
+    /**
+     * Validates the stream description against the server's length limit.
+     *
+     * NATS caps a stream description at 4096 characters and rejects a longer one at setup time.
+     *
+     * @param array<string, mixed> $configuration Merged configuration array
+     */
+    private function assertStreamDescriptionLength(array $configuration): void
+    {
+        $value = $configuration[TransportOption::STREAM_DESCRIPTION->value] ?? null;
+        if ($value === null) {
+            return;
+        }
+
+        $description = TypeCoercion::stringValue($value);
+        if (strlen($description) > self::MAX_STREAM_DESCRIPTION_LENGTH) {
+            throw new InvalidArgumentException(sprintf(
+                'The %s option must not exceed %d characters (got %d): NATS rejects longer descriptions.',
+                TransportOption::STREAM_DESCRIPTION->value,
+                self::MAX_STREAM_DESCRIPTION_LENGTH,
+                strlen($description),
+            ));
         }
     }
 

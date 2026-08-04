@@ -268,7 +268,8 @@ framework:
           stream_max_bytes: 1073741824      # Max storage size in bytes (null = unlimited)
           stream_max_messages: 1000000      # Max number of messages in the stream (null = unlimited)
           stream_max_messages_per_subject: 1000 # Max number of messages retained per subject (null = unlimited)
-          stream_max_message_size: 1048576  # Max size of a single message in bytes (null = unlimited)
+          stream_max_message_size: 1048576  # Max size of a single message in bytes (null = unlimited).
+                                            # Must be a positive integer, at most 2147483647.
           stream_max_consumers: 10          # Max consumers allowed on the stream (null = unlimited)
                                             # ⚠️ NATS up to 2.11 refuses to change this on an existing
                                             # stream. When left unset the transport keeps whatever the
@@ -281,13 +282,16 @@ framework:
                                             # the stream to change retention (see note below).
           stream_discard: 'old'             # old|new - what to drop when a limit is hit (default: null = 'old')
           stream_duplicate_window: 120      # De-duplication window in seconds (null = server default).
+                                            # Must be a positive integer; 0 is rejected because NATS
+                                            # would substitute its own 2-minute default.
                                             # Must not exceed stream_max_age when that is set.
 
           # Storage Backend
           stream_storage: 'file'            # Storage type: 'file' or 'memory' (default: 'file')
                                             # ⚠️ Immutable once the stream exists (like stream_retention).
           stream_compression: 'none'        # none|s2 (default: null = server default 'none')
-          stream_description: 'my stream'   # Human-readable stream description (null = unset)
+          stream_description: 'my stream'   # Human-readable stream description (null = unset).
+                                            # At most 4096 characters.
 
           # Stream Access Policy (null = leave the server default untouched)
           stream_deny_delete: false         # Deny message deletion from the stream

@@ -1235,6 +1235,58 @@ final class NatsTransportConfigurationBuilderTest extends TestCase
         (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, ['stream_max_consumers' => 0]);
     }
 
+    public function testBuildWithZeroStreamMaxMessageSizeThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The stream_max_message_size option must be a positive integer value.');
+
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, ['stream_max_message_size' => 0]);
+    }
+
+    public function testBuildWithStreamMaxMessageSizeExceedingInt32ThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The stream_max_message_size option must not exceed 2147483647');
+
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, ['stream_max_message_size' => 3000000000]);
+    }
+
+    public function testBuildAcceptsStreamMaxMessageSizeAtTheInt32Boundary(): void
+    {
+        $config = (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, [
+            'stream_max_message_size' => 2147483647,
+        ]);
+
+        self::assertSame(2147483647, $config->streamMaxMessageSize());
+    }
+
+    public function testBuildWithZeroDuplicateWindowThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The stream_duplicate_window option must be a positive integer value.');
+
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, ['stream_duplicate_window' => 0]);
+    }
+
+    public function testBuildWithOverlongStreamDescriptionThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The stream_description option must not exceed 4096 characters (got 4097)');
+
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, [
+            'stream_description' => str_repeat('a', 4097),
+        ]);
+    }
+
+    public function testBuildAcceptsStreamDescriptionAtTheLengthLimit(): void
+    {
+        $config = (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, [
+            'stream_description' => str_repeat('a', 4096),
+        ]);
+
+        self::assertSame(4096, strlen((string) $config->streamDescription()));
+    }
+
     public function testBuildParsesNewOptionsFromDsnQuery(): void
     {
         $config = (new NatsTransportConfigurationBuilder())->build(

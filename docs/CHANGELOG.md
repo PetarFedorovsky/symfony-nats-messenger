@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configuration builder.
 
 ### Fixed
+- **Tightened validation of the new numeric options.** `stream_max_message_size` and
+  `stream_duplicate_window` now require a positive integer instead of a non-negative one: they default
+  to `null`, which already means "unlimited" / "server default", so an explicit `0` only looked like the
+  option had been ignored (NATS reads `max_msg_size: 0` as unlimited and replaces a `0` duplicate window
+  with its own 2-minute default). `stream_max_message_size` is additionally capped at `2147483647`,
+  since the server stores it as a 32-bit integer and a larger value failed inside `setup()` with a raw
+  Go unmarshal error. `stream_description` is checked against the server's 4096-character limit.
 - **`auto_setup` now re-provisions when JetStream reports the stream or consumer as missing.** The
   one-shot flag was latched for the lifetime of the transport object, so a consumer that NATS removed
   after `inactive_threshold` left the worker pulling from a consumer that no longer existed and
