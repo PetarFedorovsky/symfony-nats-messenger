@@ -13,8 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `stream_discard` (`old`|`new`), `stream_duplicate_window` (seconds), `stream_max_message_size` (bytes),
   `stream_max_consumers`, `stream_compression` (`none`|`s2`), `stream_description`, and the access-policy
   flags `stream_deny_delete`, `stream_deny_purge`, `stream_allow_direct`, `stream_allow_rollup_headers`.
-  Enum/allowlist-backed options are validated with clear errors (like `retry_handler`); numeric options
-  reuse the existing positive/non-negative validators.
+  Enum-backed options are validated with clear errors (like `retry_handler`); numeric options reuse the
+  existing validators and require a positive integer, since `null` already means unlimited.
 - **New consumer configuration DSN options**: `max_ack_pending`, `inactive_threshold` (seconds), and
   `replay_policy` (`instant`|`original`).
 - **`auto_setup` option**, named after the Symfony AMQP transport's option of the same name. When

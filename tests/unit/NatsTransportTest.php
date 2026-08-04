@@ -1610,6 +1610,36 @@ final class NatsTransportTest extends TestCase
         self::assertSame([], array_values(iterator_to_array($transport->get())));
     }
 
+    public function testAutoSetupRethrowsAnUnexpectedErrorFromTheRetriedPull(): void
+    {
+        $consumerInfo = new ConsumerInfo(
+            streamName: 'test-stream',
+            name: 'client',
+            push: false,
+            raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+        );
+
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->expects(self::exactly(2))->method('addStream')->willReturn(Future::complete());
+        $jetStream->expects(self::exactly(2))->method('addConsumer')->willReturn(Future::complete($consumerInfo));
+        // The retry after re-provisioning hits a genuine error, which must surface rather than be
+        // flattened into an empty batch like a 404 or 408 would be.
+        $jetStream->expects(self::exactly(2))
+            ->method('fetchBatch')
+            ->willReturnOnConsecutiveCalls(
+                Future::error(new JetStreamException('consumer not found', 404)),
+                Future::error(new JetStreamException('backend unavailable', 500)),
+            );
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, ['auto_setup' => true]);
+        $transport->setJetStreamContext($jetStream);
+
+        $this->expectException(JetStreamException::class);
+        $this->expectExceptionMessage('backend unavailable');
+
+        iterator_to_array($transport->get());
+    }
+
     public function testCloseResetsAutoSetupSoTheNextOperationProvisionsAgain(): void
     {
         $consumerInfo = new ConsumerInfo(
