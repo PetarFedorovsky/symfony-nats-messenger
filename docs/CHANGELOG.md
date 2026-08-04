@@ -17,9 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reuse the existing positive/non-negative validators.
 - **New consumer configuration DSN options**: `max_ack_pending`, `inactive_threshold` (seconds), and
   `replay_policy` (`instant`|`original`).
-- **`auto_setup` option** (default `false`) mirroring the Symfony AMQP transport. When enabled, the
-  transport provisions the stream and consumer once, lazily, on the first `send()`/`get()` instead of
-  requiring `messenger:setup-transports`. Defaulting to `false` preserves existing behavior.
+- **`auto_setup` option**, named after the Symfony AMQP transport's option of the same name. When
+  enabled, the transport provisions the stream and consumer once, lazily, on the first `send()`/`get()`
+  instead of requiring `messenger:setup-transports`. Unlike the AMQP transport, it defaults to `false`,
+  which preserves existing behavior.
+- **`stream_retention` is written only at stream creation.** NATS rejects changing the retention policy
+  of an existing stream, so on the update path the transport preserves the live server value and a
+  changed `stream_retention` is ignored until the stream is recreated. (`stream_storage` already behaved
+  this way before this release.)
+- **Build-time validation that `stream_duplicate_window` does not exceed a finite `stream_max_age`**,
+  with a clear error instead of an opaque server rejection at setup time.
 - **`TypeCoercion::boolValue()`** centralizing the mixed→bool casting policy previously inlined in the
   configuration builder.
 
@@ -35,12 +42,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `messenger:setup-transports` failed permanently for anyone whose stream had a consumer limit set
   outside this transport, and on 2.12 and newer the limit was silently cleared. The field is now written
   only when `stream_max_consumers` is configured; otherwise the server value is left untouched.
-
-### Changed
-- **`stream_retention` and `stream_storage` are treated as immutable on an existing stream.** Both are
-  written only at stream creation; on the update path the transport preserves the live server value
-  (NATS rejects changing either on an existing stream). A `stream_duplicate_window` larger than a finite
-  `stream_max_age` is now rejected at build time with a clear error instead of failing at setup.
 
 ## [5.0.0] - 2026-06-17
 
