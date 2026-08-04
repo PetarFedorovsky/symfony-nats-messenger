@@ -751,8 +751,9 @@ framework:
 > created - NATS rejects changing either on an existing stream. On the update path the transport
 > preserves the live server values, so changing these options on an already-created stream is a no-op.
 > To change retention or storage, recreate the stream: delete it, then re-run
-> `messenger:setup-transports`. With `auto_setup=true` a running worker recreates it on its next pull,
-> because the missing stream surfaces as a 404 that triggers re-provisioning.
+> `messenger:setup-transports`. With `auto_setup=true` a running worker recreates it on its next pull:
+> deleting the stream deletes its consumers with it, so the pull fails with status 503 (nothing is left
+> to answer it), which is one of the statuses that trigger re-provisioning.
 
 > **Note on `replay_policy`:** the replay policy of a durable consumer is fixed when the consumer is
 > created. NATS rejects an update that changes it, in both directions: once a consumer exists as
