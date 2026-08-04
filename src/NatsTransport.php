@@ -837,7 +837,14 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
         $updatedConfiguration['max_msgs'] = $this->configuration->streamMaxMessages() ?? -1;
         $updatedConfiguration['max_msgs_per_subject'] = $this->configuration->streamMaxMessagesPerSubject() ?? -1;
         $updatedConfiguration['max_msg_size'] = $this->configuration->streamMaxMessageSize() ?? -1;
-        $updatedConfiguration['max_consumers'] = $this->configuration->streamMaxConsumers() ?? -1;
+
+        // max_consumers is deliberately NOT in the authoritative list above. NATS servers up to and
+        // including 2.11 refuse to change it on an existing stream ("stream configuration update can
+        // not change MaxConsumers"), so writing the unlimited sentinel here would make setup() fail
+        // permanently for anyone on the ^2.9 range this library supports whose stream was created with
+        // a consumer limit, and would silently clear that limit on 2.12 and newer. When
+        // stream_max_consumers is configured it arrives through $managedOptions and the array_merge
+        // above applies it; when it is not configured the server's own value is left untouched.
 
         if (array_key_exists('storage', $serverConfiguration)) {
             $updatedConfiguration['storage'] = $serverConfiguration['storage'];

@@ -267,6 +267,9 @@ framework:
           stream_max_messages_per_subject: 1000 # Max number of messages retained per subject (null = unlimited)
           stream_max_message_size: 1048576  # Max size of a single message in bytes (null = unlimited)
           stream_max_consumers: 10          # Max consumers allowed on the stream (null = unlimited)
+                                            # ⚠️ NATS up to 2.11 refuses to change this on an existing
+                                            # stream. When left unset the transport keeps whatever the
+                                            # stream already has, so it never breaks an existing setup.
 
           # Stream Retention & De-duplication Behavior
           stream_retention: 'limits'        # limits|interest|workqueue (default: null = server default 'limits').
@@ -722,6 +725,12 @@ framework:
 > preserves the live server values, so changing these options on an already-created stream is a no-op.
 > To change retention or storage, recreate the stream (delete it, then re-run setup / let `auto_setup`
 > recreate it).
+
+> **Note on `stream_max_consumers`:** NATS servers up to and including 2.11 also refuse to change
+> `max_consumers` on an existing stream. The transport therefore writes it only when you set the option
+> explicitly; when you leave it unset, the stream keeps whatever value it already has. Setting it on an
+> already-created stream works on NATS 2.12 and newer, and is rejected by the server on older versions -
+> recreate the stream to change it there.
 
 > **Tested by:** `testSetupCreatesStreamAndConsumer`, `testSetupPassesConfiguredStreamOptions`, `testSetupPassesNewStreamPolicyOptions`, `testSetupPassesNewConsumerOptions`, `testAutoSetupProvisionsOnFirstSendOnce`, `testAutoSetupProvisionsOnFirstGet`, `testAutoSetupDisabledByDefaultDoesNotProvisionOnSend`, `testSetupUpdatesExistingStreamMergesSubjectsAndPreservesServerConfig`, Behat scenarios `Setup NATS stream with max age configuration`, `Setup command handles existing streams gracefully`, and `Custom consumer name is registered in JetStream`
 

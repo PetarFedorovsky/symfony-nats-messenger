@@ -23,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`TypeCoercion::boolValue()`** centralizing the mixed→bool casting policy previously inlined in the
   configuration builder.
 
+### Fixed
+- **`stream_max_consumers` no longer breaks `setup()` on an existing stream.** The update payload used to
+  write `max_consumers` unconditionally, falling back to the unlimited sentinel `-1` when the option was
+  unset. NATS servers up to and including 2.11 reject any change to that field, so
+  `messenger:setup-transports` failed permanently for anyone whose stream had a consumer limit set
+  outside this transport, and on 2.12 and newer the limit was silently cleared. The field is now written
+  only when `stream_max_consumers` is configured; otherwise the server value is left untouched.
+
 ### Changed
 - **`stream_retention` and `stream_storage` are treated as immutable on an existing stream.** Both are
   written only at stream creation; on the update path the transport preserves the live server value

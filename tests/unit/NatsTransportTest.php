@@ -1243,7 +1243,7 @@ final class NatsTransportTest extends TestCase
             ->willReturn(Future::complete($streamInfo));
         $jetStream->expects(self::once())
             ->method('updateStream')
-            ->with('test-stream', ['subjects' => ['test-topic'], 'storage' => 'file', 'num_replicas' => 1, 'max_age' => 0, 'max_bytes' => -1, 'max_msgs' => -1, 'max_msgs_per_subject' => -1, 'max_msg_size' => -1, 'max_consumers' => -1])
+            ->with('test-stream', ['subjects' => ['test-topic'], 'storage' => 'file', 'num_replicas' => 1, 'max_age' => 0, 'max_bytes' => -1, 'max_msgs' => -1, 'max_msgs_per_subject' => -1, 'max_msg_size' => -1])
             ->willReturn(Future::complete());
         $jetStream->expects(self::once())
             ->method('addConsumer')
@@ -1394,7 +1394,7 @@ final class NatsTransportTest extends TestCase
             ->willReturn(Future::complete($streamInfo));
         $jetStream->expects(self::once())
             ->method('updateStream')
-            ->with('test-stream', ['subjects' => ['test-topic'], 'storage' => 'file', 'num_replicas' => 1, 'max_age' => 0, 'max_bytes' => -1, 'max_msgs' => -1, 'max_msgs_per_subject' => -1, 'max_msg_size' => -1, 'max_consumers' => -1])
+            ->with('test-stream', ['subjects' => ['test-topic'], 'storage' => 'file', 'num_replicas' => 1, 'max_age' => 0, 'max_bytes' => -1, 'max_msgs' => -1, 'max_msgs_per_subject' => -1, 'max_msg_size' => -1])
             ->willReturn(Future::complete());
         $jetStream->expects(self::once())
             ->method('addConsumer')
@@ -1644,7 +1644,7 @@ final class NatsTransportTest extends TestCase
             ->willReturn(Future::complete($streamInfo));
         $jetStream->expects(self::once())
             ->method('updateStream')
-            ->with('test-stream', ['subjects' => ['test-topic'], 'storage' => 'file', 'num_replicas' => 1, 'max_age' => 0, 'max_bytes' => -1, 'max_msgs' => -1, 'max_msgs_per_subject' => -1, 'max_msg_size' => -1, 'max_consumers' => -1])
+            ->with('test-stream', ['subjects' => ['test-topic'], 'storage' => 'file', 'num_replicas' => 1, 'max_age' => 0, 'max_bytes' => -1, 'max_msgs' => -1, 'max_msgs_per_subject' => -1, 'max_msg_size' => -1])
             ->willReturn(Future::complete());
         $jetStream->expects(self::once())
             ->method('addConsumer')
@@ -1690,7 +1690,7 @@ final class NatsTransportTest extends TestCase
             ->willReturn(Future::complete($streamInfo));
         $jetStream->expects(self::once())
             ->method('updateStream')
-            ->with('test-stream', ['subjects' => ['test-topic'], 'storage' => 'file', 'num_replicas' => 1, 'max_age' => 0, 'max_bytes' => -1, 'max_msgs' => -1, 'max_msgs_per_subject' => -1, 'max_msg_size' => -1, 'max_consumers' => -1])
+            ->with('test-stream', ['subjects' => ['test-topic'], 'storage' => 'file', 'num_replicas' => 1, 'max_age' => 0, 'max_bytes' => -1, 'max_msgs' => -1, 'max_msgs_per_subject' => -1, 'max_msg_size' => -1])
             ->willReturn(Future::complete());
         $jetStream->expects(self::once())
             ->method('addConsumer')
@@ -2567,6 +2567,10 @@ final class NatsTransportTest extends TestCase
                     'max_bytes' => 1024,
                     'max_msgs' => 500,
                     'max_msgs_per_subject' => 50,
+                    'max_msg_size' => 1_048_576,
+                    // Set by an operator outside this transport. NATS refuses to change it on an
+                    // existing stream up to 2.11, so it must survive the update untouched.
+                    'max_consumers' => 3,
                 ],
             ],
         );
@@ -2583,7 +2587,10 @@ final class NatsTransportTest extends TestCase
                 return ($options['max_age'] ?? null) === 0
                     && ($options['max_bytes'] ?? null) === -1
                     && ($options['max_msgs'] ?? null) === -1
-                    && ($options['max_msgs_per_subject'] ?? null) === -1;
+                    && ($options['max_msgs_per_subject'] ?? null) === -1
+                    && ($options['max_msg_size'] ?? null) === -1
+                    // Preserved, not reset: max_consumers is immutable on an existing stream.
+                    && ($options['max_consumers'] ?? null) === 3;
             }))
             ->willReturn(Future::complete());
         $jetStream->expects(self::once())
@@ -2604,6 +2611,58 @@ final class NatsTransportTest extends TestCase
         // No stream_max_* options provided, so the previously-configured limits must be reset to
         // JetStream's unlimited sentinels on update rather than preserved from the server config.
         $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, []);
+        $transport->setJetStreamContext($jetStream);
+
+        $transport->setup();
+    }
+
+    public function testSetupUpdateAppliesExplicitlyConfiguredStreamMaxConsumers(): void
+    {
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $streamInfo = new StreamInfo(
+            name: 'test-stream',
+            subjects: ['test-topic'],
+            raw: [
+                'config' => [
+                    'name' => 'test-stream',
+                    'subjects' => ['test-topic'],
+                    'storage' => 'file',
+                    'max_consumers' => 3,
+                ],
+            ],
+        );
+        $jetStream->expects(self::once())
+            ->method('addStream')
+            ->willReturn(Future::error(new JetStreamException('already exists', 0)));
+        $jetStream->expects(self::once())
+            ->method('getStream')
+            ->with('test-stream')
+            ->willReturn(Future::complete($streamInfo));
+        $jetStream->expects(self::once())
+            ->method('updateStream')
+            ->with('test-stream', self::callback(static function (array $options): bool {
+                return ($options['max_consumers'] ?? null) === 7;
+            }))
+            ->willReturn(Future::complete());
+        $jetStream->expects(self::once())
+            ->method('addConsumer')
+            ->willReturn(Future::complete(new ConsumerInfo(
+                streamName: 'test-stream',
+                name: 'client',
+                push: false,
+                raw: [
+                    'config' => [
+                        'ack_policy' => 'explicit',
+                        'deliver_policy' => 'all',
+                        'filter_subject' => 'test-topic',
+                    ],
+                ],
+            )));
+
+        // The option was set explicitly, so the operator's intent wins over the server value. NATS
+        // 2.12 and newer accept the change; older servers reject it with their own error, which is the
+        // documented trade-off of setting this option on an already-created stream.
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, ['stream_max_consumers' => 7]);
         $transport->setJetStreamContext($jetStream);
 
         $transport->setup();
