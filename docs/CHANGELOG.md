@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with its own 2-minute default). `stream_max_message_size` is additionally capped at `2147483647`,
   since the server stores it as a 32-bit integer and a larger value failed inside `setup()` with a raw
   Go unmarshal error. `stream_description` is checked against the server's 4096-character limit.
+- **The stream update path clamps an inherited de-duplication window to a lowered `stream_max_age`.**
+  NATS rejects a stream whose `duplicate_window` exceeds a finite `max_age`, and the window is normally
+  inherited from the live stream, so lowering `stream_max_age` on a stream sitting on the server's
+  2-minute default window failed at setup with "duplicates window can not be larger then max age". The
+  build-time check cannot catch this, since it only compares options the caller supplied. The update
+  payload now clamps the window the same way the server does when a stream is created.
 - **`auto_setup` now re-provisions when JetStream reports the stream or consumer as missing.** The
   one-shot flag was latched for the lifetime of the transport object, so a consumer that NATS removed
   after `inactive_threshold` left the worker pulling from a consumer that no longer existed and

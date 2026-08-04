@@ -951,6 +951,18 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
         $updatedConfiguration['max_msgs_per_subject'] = $this->configuration->streamMaxMessagesPerSubject() ?? -1;
         $updatedConfiguration['max_msg_size'] = $this->configuration->streamMaxMessageSize() ?? -1;
 
+        // NATS refuses a stream whose duplicate window is larger than a finite max age. The window is
+        // usually inherited from the live server config (the transport only writes it when
+        // stream_duplicate_window is set), so lowering stream_max_age on a stream that is on the
+        // server's 2-minute default window produces exactly that rejection. The build-time validator
+        // cannot see it, because it only compares options the caller actually supplied. Clamp the
+        // window to the max age here, which is what the server itself does when a stream is created.
+        $maxAgeNanoseconds = TypeCoercion::intValue($updatedConfiguration['max_age']);
+        $duplicateWindowNanoseconds = TypeCoercion::intValue($updatedConfiguration['duplicate_window'] ?? 0);
+        if ($maxAgeNanoseconds > 0 && $duplicateWindowNanoseconds > $maxAgeNanoseconds) {
+            $updatedConfiguration['duplicate_window'] = $maxAgeNanoseconds;
+        }
+
         // max_consumers is deliberately NOT in the authoritative list above. NATS servers up to and
         // including 2.11 refuse to change it on an existing stream ("stream configuration update can
         // not change MaxConsumers"), so writing the unlimited sentinel here would make setup() fail
