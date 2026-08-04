@@ -1,6 +1,10 @@
+# NATS_IMAGE selects the server version. It defaults to nats:alpine (latest) for local work; CI also
+# runs the functional suite against the oldest supported server, because several JetStream fields
+# (max_consumers, replay_policy) are immutable on older versions and mutable on newer ones, so a
+# latest-only matrix silently misses regressions for users on the ^2.9 range the README supports.
 services:
   nats:
-    image: nats:alpine
+    image: ${NATS_IMAGE:-nats:alpine}
     container_name: nats_test
     restart: always
     command: -c /etc/nats/nats.conf
@@ -13,7 +17,7 @@ services:
       - ./data:/data
 
   nats-tls:
-    image: nats:alpine
+    image: ${NATS_IMAGE:-nats:alpine}
     container_name: nats_test_tls
     restart: always
     command: -c /etc/nats/nats.conf
@@ -27,7 +31,7 @@ services:
       - ./data-tls:/data
 
   nats-mtls:
-    image: nats:alpine
+    image: ${NATS_IMAGE:-nats:alpine}
     container_name: nats_test_mtls
     restart: always
     command: -c /etc/nats/nats.conf

@@ -51,3 +51,11 @@ Feature: NATS Stream Limits
     And the test files directory is clean
     When I send 10 messages to the transport
     Then the NATS stream should contain at most 5 messages
+
+  @limits
+  Scenario: Update a stream an operator created with a consumer limit
+    Given I have a messenger transport configured with max age of 15 minutes
+    And the NATS stream already exists with a consumer limit of 3
+    When I run the messenger setup command
+    Then the setup should complete successfully
+    And the stream should have max consumers of 3

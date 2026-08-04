@@ -115,6 +115,7 @@ This document maps each feature of the Symfony NATS Messenger Bridge to the test
 | **Max messages (update)** | Update existing stream preserves max messages limit |
 | **Max messages per subject (update)** | Update existing stream preserves max messages per subject limit |
 | **Message eviction** | Stream evicts oldest messages when max messages limit is exceeded |
+| **Operator-set consumer limit (update)** | Update a stream an operator created with a consumer limit |
 
 ### Auto Setup (`tests/functional/features/nats_auto_setup.feature`)
 

@@ -137,6 +137,47 @@ class NatsSetupContext implements Context
     }
 
     /**
+     * Creates the stream out-of-band with a consumer limit, the way an operator would via the nats CLI
+     * or Terraform.
+     *
+     * NATS up to 2.11 refuses to change max_consumers on an existing stream, so a transport that writes
+     * that field unconditionally breaks setup() for such a stream. The bare stream created by the step
+     * above cannot show this, because it leaves max_consumers at the server default.
+     *
+     * @Given the NATS stream already exists with a consumer limit of :limit
+     */
+    public function theNatsStreamAlreadyExistsWithAConsumerLimitOf(int $limit): void
+    {
+        if (!$this->shouldNatsBeRunning) {
+            throw new \RuntimeException('NATS must be running to create a stream');
+        }
+
+        $client = $this->createNatsClient();
+        $client->jetStream()->createStream(
+            $this->testStreamName,
+            [$this->testSubject],
+            ['max_consumers' => $limit],
+        )->await();
+    }
+
+    /**
+     * @Then the stream should have max consumers of :maxConsumers
+     */
+    public function theStreamShouldHaveMaxConsumersOf(int $maxConsumers): void
+    {
+        $client = $this->createNatsClient();
+        $streamInfo = $client->jetStream()->getStream($this->testStreamName)->await();
+        $config = is_array($streamInfo->raw['config'] ?? null) ? $streamInfo->raw['config'] : [];
+        $actual = $config['max_consumers'] ?? null;
+
+        if ($actual !== $maxConsumers) {
+            throw new \RuntimeException(
+                sprintf('Expected max consumers of %d, but got %s', $maxConsumers, var_export($actual, true))
+            );
+        }
+    }
+
+    /**
      * @When I run the messenger setup command
      */
     public function iRunTheMessengerSetupCommand(): void
