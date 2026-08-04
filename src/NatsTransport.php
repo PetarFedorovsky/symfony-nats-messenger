@@ -192,15 +192,16 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
      * Pulls and decodes a batch of envelopes from JetStream.
      *
      * Fetches up to {@see NatsTransportConfiguration::batching()} messages with the
-     * configured timeout. JetStream status 404 (consumer not found) and 408 (timeout / no messages)
-     * are treated as empty results. A message without a reply (ack) subject is skipped
-     * (it can be neither acknowledged nor rejected); a message with an empty payload is
-     * TERMed so JetStream stops redelivering it, since it can never decode into an
+     * configured timeout. JetStream status 404 (stream or consumer lookup failed) and 408
+     * (timeout / no messages) are treated as empty results. A message without a reply (ack)
+     * subject is skipped (it can be neither acknowledged nor rejected); a message with an empty
+     * payload is TERMed so JetStream stops redelivering it, since it can never decode into an
      * envelope. On deserialization failure the message is rejected via
      * {@see handleFailedDelivery()} before the exception propagates.
      *
-     * With auto_setup enabled, a 404 additionally triggers one re-provisioning attempt before the
-     * empty result is reported (see {@see reprovisionForAutoSetup()}).
+     * With auto_setup enabled, a status that signals a missing stream or consumer (404, 409, or
+     * 503; see {@see recoverFromFetchFailure()} for why all three) additionally triggers one
+     * re-provisioning attempt before the empty result is reported.
      *
      * @return iterable<Envelope>
      */
@@ -593,8 +594,12 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
             try {
                 return $this->fetchBatchMessages();
             } catch (JetStreamException $retryException) {
-                // One re-provisioning attempt and one retry. If the resource is still missing, report
-                // an empty batch rather than looping; anything else is a real error.
+                // One re-provisioning attempt and one retry. The retry deliberately accepts a narrower
+                // set of codes than the recovery above: setup() just recreated the consumer, so at this
+                // point a 408 is a normal empty pull and a 404 keeps the historical empty-queue read,
+                // but a repeated 503 or 409 no longer means "missing" - it means pulls are failing on a
+                // consumer that verifiably exists, and flattening that into an empty batch would hide
+                // a real outage behind a worker that forever reports nothing to do.
                 if ($retryException->getCode() === 404 || $retryException->getCode() === 408) {
                     return null;
                 }
