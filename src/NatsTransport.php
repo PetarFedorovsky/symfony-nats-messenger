@@ -842,8 +842,10 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
             $streamConfiguration->duplicateWindow($this->configuration->duplicateWindowSeconds());
         }
 
-        if ($this->configuration->compression() !== null) {
-            $streamConfiguration->compression($this->configuration->compression());
+        $compression = $this->configuration->compression();
+        if ($compression !== null) {
+            // The client models compression as a plain string field, so unwrap the local enum here.
+            $streamConfiguration->compression($compression->value);
         }
 
         if ($this->configuration->streamDescription() !== null) {

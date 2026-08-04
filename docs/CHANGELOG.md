@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this way before this release.)
 - **Build-time validation that `stream_duplicate_window` does not exceed a finite `stream_max_age`**,
   with a clear error instead of an opaque server rejection at setup time.
+- **`StreamCompression` enum** (`none`|`s2`) backing the `stream_compression` option, so the allowed
+  values have one authoritative definition instead of an allowlist repeated in the validator, the
+  accessor docblock and the README. `NatsTransportConfiguration::compression()` returns the enum,
+  matching how `stream_retention`, `stream_discard` and `replay_policy` are exposed.
 - **`TypeCoercion::boolValue()`** centralizing the mixed→bool casting policy previously inlined in the
   configuration builder.
 

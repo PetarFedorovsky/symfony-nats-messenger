@@ -205,13 +205,13 @@ final readonly class NatsTransportConfiguration
     }
 
     /**
-     * Returns the configured stream compression algorithm ('none' or 's2'), or null to leave it unset.
+     * Returns the configured stream compression algorithm, or null to leave the server default.
      */
-    public function compression(): ?string
+    public function compression(): ?StreamCompression
     {
         $value = $this->options[TransportOption::STREAM_COMPRESSION->value] ?? null;
 
-        return $value === null ? null : TypeCoercion::stringValue($value);
+        return $value === null ? null : StreamCompression::from(TypeCoercion::stringValue($value));
     }
 
     /**

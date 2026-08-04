@@ -10,6 +10,7 @@ use IDCT\NATS\JetStream\Enum\RetentionPolicy;
 use IDCT\NatsMessenger\Options\NatsTransportConfiguration;
 use IDCT\NatsMessenger\Options\NatsTransportConfigurationBuilder;
 use IDCT\NatsMessenger\Options\RetryHandler;
+use IDCT\NatsMessenger\Options\StreamCompression;
 use IDCT\NatsMessenger\Options\TransportOption;
 use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -943,7 +944,7 @@ final class NatsTransportConfigurationBuilderTest extends TestCase
         self::assertSame('limits', $configuration->retention()?->value);
         self::assertSame('old', $configuration->discard()?->value);
         self::assertSame(120, $configuration->duplicateWindowSeconds());
-        self::assertSame('none', $configuration->compression());
+        self::assertSame(StreamCompression::None, $configuration->compression());
         self::assertSame('my stream', $configuration->streamDescription());
         self::assertFalse($configuration->denyDelete());
         self::assertFalse($configuration->denyPurge());
@@ -1136,7 +1137,7 @@ final class NatsTransportConfigurationBuilderTest extends TestCase
         self::assertSame(30, $config->duplicateWindowSeconds());
         self::assertSame(1048576, $config->streamMaxMessageSize());
         self::assertSame(4, $config->streamMaxConsumers());
-        self::assertSame('s2', $config->compression());
+        self::assertSame(StreamCompression::S2, $config->compression());
         self::assertSame('demo', $config->streamDescription());
         self::assertTrue($config->denyDelete());
         self::assertTrue($config->denyPurge());
@@ -1185,7 +1186,7 @@ final class NatsTransportConfigurationBuilderTest extends TestCase
     public function testBuildWithInvalidCompressionThrowsException(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage("Invalid stream_compression option 'gzip'. Allowed values are 'none' or 's2'.");
+        $this->expectExceptionMessage("Invalid stream_compression option 'gzip'. Allowed values are 'none', 's2'.");
 
         (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, ['stream_compression' => 'gzip']);
     }

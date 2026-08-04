@@ -396,29 +396,20 @@ final class NatsTransportConfigurationBuilder
     /**
      * Validates and normalizes the optional stream compression algorithm, leaving it untouched when unset.
      *
-     * Not an enum in the underlying client (a plain string field), so validated against an explicit
-     * allowlist here - the two values NATS accepts.
+     * The underlying client models compression as a plain string, so the allowed values live in the
+     * local {@see StreamCompression} enum and validation goes through the same path as the client-backed
+     * enums.
      *
      * @param array<string, mixed> $configuration Merged configuration array
      */
     private function normalizeStreamCompression(array &$configuration): void
     {
-        $value = $configuration[TransportOption::STREAM_COMPRESSION->value] ?? null;
-        if ($value === null) {
-            return;
-        }
-
-        $raw = TypeCoercion::stringValue($value);
-        $normalized = strtolower($raw);
-        if (!in_array($normalized, ['none', 's2'], true)) {
-            throw new InvalidArgumentException(sprintf(
-                "Invalid %s option '%s'. Allowed values are 'none' or 's2'.",
-                TransportOption::STREAM_COMPRESSION->value,
-                $raw,
-            ));
-        }
-
-        $configuration[TransportOption::STREAM_COMPRESSION->value] = $normalized;
+        $this->normalizeEnumOption(
+            $configuration,
+            TransportOption::STREAM_COMPRESSION,
+            static fn (string $value): ?StreamCompression => StreamCompression::tryFrom($value),
+            array_column(StreamCompression::cases(), 'value'),
+        );
     }
 
     /**

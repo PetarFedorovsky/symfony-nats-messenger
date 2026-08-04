@@ -8,6 +8,7 @@ use IDCT\NATS\JetStream\Enum\ReplayPolicy;
 use IDCT\NATS\JetStream\Enum\RetentionPolicy;
 use IDCT\NATS\JetStream\Enum\StorageBackend;
 use IDCT\NatsMessenger\Options\NatsTransportConfiguration;
+use IDCT\NatsMessenger\Options\StreamCompression;
 use PHPUnit\Framework\TestCase;
 
 final class NatsTransportConfigurationTest extends TestCase
@@ -156,7 +157,7 @@ final class NatsTransportConfigurationTest extends TestCase
         self::assertSame(30, $configuration->duplicateWindowSeconds());
         self::assertSame(1048576, $configuration->streamMaxMessageSize());
         self::assertSame(4, $configuration->streamMaxConsumers());
-        self::assertSame('s2', $configuration->compression());
+        self::assertSame(StreamCompression::S2, $configuration->compression());
         self::assertSame('demo stream', $configuration->streamDescription());
         self::assertTrue($configuration->denyDelete());
         self::assertTrue($configuration->denyPurge());
