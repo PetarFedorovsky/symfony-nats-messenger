@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configuration builder.
 
 ### Fixed
+- **`auto_setup` now re-provisions when JetStream reports the stream or consumer as missing.** The
+  one-shot flag was latched for the lifetime of the transport object, so a consumer that NATS removed
+  after `inactive_threshold` left the worker pulling from a consumer that no longer existed and
+  reporting an empty queue forever. A 404 from the pull now triggers one re-provisioning attempt and a
+  single retry, and `close()` clears the flag so a reopened connection verifies provisioning again.
+  Without `auto_setup` the 404 is still treated as an empty result, unchanged.
 - **`replay_policy` no longer breaks `setup()` on an existing durable consumer.** NATS refuses to change
   a consumer's replay policy, in both directions, so adding `replay_policy` to the DSN of a running
   deployment made every `setup()` (and, with `auto_setup`, every `send()`/`get()`) fail with "replay

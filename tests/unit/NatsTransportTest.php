@@ -1355,6 +1355,104 @@ final class NatsTransportTest extends TestCase
         $transport->send(new Envelope(new \stdClass()));
     }
 
+    public function testAutoSetupReprovisionsWhenTheConsumerDisappeared(): void
+    {
+        $consumerInfo = new ConsumerInfo(
+            streamName: 'test-stream',
+            name: 'client',
+            push: false,
+            raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+        );
+
+        $jetStream = $this->createMock(JetStreamContext::class);
+        // Once for the initial lazy provisioning, once after the 404.
+        $jetStream->expects(self::exactly(2))
+            ->method('addStream')
+            ->willReturn(Future::complete());
+        $jetStream->expects(self::exactly(2))
+            ->method('addConsumer')
+            ->willReturn(Future::complete($consumerInfo));
+        // NATS removed the idle consumer, so the first pull 404s; the retry after re-provisioning
+        // succeeds and simply finds no messages.
+        $jetStream->expects(self::exactly(2))
+            ->method('fetchBatch')
+            ->willReturnOnConsecutiveCalls(
+                Future::error(new JetStreamException('consumer not found', 404)),
+                Future::complete([]),
+            );
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, ['auto_setup' => true]);
+        $transport->setJetStreamContext($jetStream);
+
+        self::assertSame([], array_values(iterator_to_array($transport->get())));
+    }
+
+    public function testGetTreats404AsEmptyWithoutReprovisioningWhenAutoSetupIsDisabled(): void
+    {
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->expects(self::never())->method('addStream');
+        $jetStream->expects(self::never())->method('addConsumer');
+        $jetStream->expects(self::once())
+            ->method('fetchBatch')
+            ->willReturn(Future::error(new JetStreamException('consumer not found', 404)));
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, []);
+        $transport->setJetStreamContext($jetStream);
+
+        self::assertSame([], array_values(iterator_to_array($transport->get())));
+    }
+
+    public function testAutoSetupReprovisioningRetryStopsAfterOneAttempt(): void
+    {
+        $consumerInfo = new ConsumerInfo(
+            streamName: 'test-stream',
+            name: 'client',
+            push: false,
+            raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+        );
+
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->expects(self::exactly(2))->method('addStream')->willReturn(Future::complete());
+        $jetStream->expects(self::exactly(2))->method('addConsumer')->willReturn(Future::complete($consumerInfo));
+        // Still 404 after re-provisioning: report an empty batch rather than looping.
+        $jetStream->expects(self::exactly(2))
+            ->method('fetchBatch')
+            ->willReturn(Future::error(new JetStreamException('consumer not found', 404)));
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, ['auto_setup' => true]);
+        $transport->setJetStreamContext($jetStream);
+
+        self::assertSame([], array_values(iterator_to_array($transport->get())));
+    }
+
+    public function testCloseResetsAutoSetupSoTheNextOperationProvisionsAgain(): void
+    {
+        $consumerInfo = new ConsumerInfo(
+            streamName: 'test-stream',
+            name: 'client',
+            push: false,
+            raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+        );
+
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->expects(self::exactly(2))->method('addStream')->willReturn(Future::complete());
+        $jetStream->expects(self::exactly(2))->method('addConsumer')->willReturn(Future::complete($consumerInfo));
+        $jetStream->expects(self::exactly(2))->method('fetchBatch')->willReturn(Future::complete([]));
+
+        $client = $this->createMock(NatsClient::class);
+        $client->expects(self::exactly(2))->method('connect')->willReturn(Future::complete());
+        $client->expects(self::exactly(2))->method('jetStream')->willReturn($jetStream);
+        $client->expects(self::once())->method('disconnect')->willReturn(Future::complete());
+
+        $transport = new RealConnectNatsTransport(self::VALID_DSN, ['auto_setup' => true]);
+        $transport->setClient($client);
+
+        iterator_to_array($transport->get());
+        $transport->close();
+        // The reopened connection provisions again instead of trusting the latched flag.
+        iterator_to_array($transport->get());
+    }
+
     public function testSetupUpdatesStreamWhenItAlreadyExists(): void
     {
         $jetStream = $this->createMock(JetStreamContext::class);

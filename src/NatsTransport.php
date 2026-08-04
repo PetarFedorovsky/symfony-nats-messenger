@@ -199,6 +199,9 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
      * envelope. On deserialization failure the message is rejected via
      * {@see handleFailedDelivery()} before the exception propagates.
      *
+     * With auto_setup enabled, a 404 additionally triggers one re-provisioning attempt before the
+     * empty result is reported (see {@see reprovisionForAutoSetup()}).
+     *
      * @return iterable<Envelope>
      */
     public function get(): iterable
@@ -206,18 +209,33 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
         $this->autoSetupIfEnabled();
 
         try {
-            $messages = $this->jetStream()->fetchBatch(
-                $this->streamName,
-                $this->configuration->consumer(),
-                $this->configuration->batching(),
-                $this->configuration->maxBatchTimeoutMs()
-            )->await();
+            $messages = $this->fetchBatchMessages();
         } catch (JetStreamException $e) {
-            if ($e->getCode() === 404 || $e->getCode() === 408) {
+            if ($e->getCode() === 408) {
                 return [];
             }
 
-            throw $e;
+            if ($e->getCode() !== 404) {
+                throw $e;
+            }
+
+            // 404 means the stream or the durable consumer is not there. When auto_setup owns
+            // provisioning, recreate it and try once more instead of reporting an empty batch: a
+            // consumer that NATS removed after inactive_threshold would otherwise leave this worker
+            // polling a queue that no longer exists, silently and forever.
+            if (!$this->reprovisionForAutoSetup()) {
+                return [];
+            }
+
+            try {
+                $messages = $this->fetchBatchMessages();
+            } catch (JetStreamException $retryException) {
+                if ($retryException->getCode() === 404 || $retryException->getCode() === 408) {
+                    return [];
+                }
+
+                throw $retryException;
+            }
         }
 
         foreach ($messages as $message) {
@@ -369,6 +387,11 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
 
         $this->client->disconnect()->await();
         $this->jetStream = null;
+
+        // The next operation reconnects lazily, so let auto_setup verify provisioning once more on the
+        // reopened connection. Without this the flag would stay latched for the lifetime of the object
+        // and a stream removed while the transport was closed would never be recreated.
+        $this->autoSetupDone = false;
     }
 
     /**
@@ -534,6 +557,45 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
 
         $this->setup();
         $this->autoSetupDone = true;
+    }
+
+    /**
+     * Re-runs provisioning after JetStream reported the stream or consumer as missing.
+     *
+     * Only meaningful with auto_setup: that option makes the transport responsible for the stream and
+     * consumer existing, so it also has to cope with them disappearing while the process runs. The
+     * common cause is inactive_threshold, after which NATS removes an idle durable consumer; without
+     * this, a low-traffic worker would keep pulling from a consumer that is gone and report an empty
+     * queue forever.
+     *
+     * Returns false when auto_setup is disabled, in which case provisioning is the operator's job and
+     * the caller should treat the missing resource as an empty result, exactly as before.
+     */
+    private function reprovisionForAutoSetup(): bool
+    {
+        if (!$this->configuration->isAutoSetupEnabled()) {
+            return false;
+        }
+
+        $this->autoSetupDone = false;
+        $this->autoSetupIfEnabled();
+
+        return true;
+    }
+
+    /**
+     * Pulls one raw batch from the configured durable consumer.
+     *
+     * @return list<NatsMessage>
+     */
+    private function fetchBatchMessages(): array
+    {
+        return $this->jetStream()->fetchBatch(
+            $this->streamName,
+            $this->configuration->consumer(),
+            $this->configuration->batching(),
+            $this->configuration->maxBatchTimeoutMs()
+        )->await();
     }
 
     /**

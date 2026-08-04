@@ -711,9 +711,10 @@ symfony console messenger:setup-transports nats_transport
 ```
 
 **Automatic (`auto_setup`).** Set `auto_setup=true` to have the transport provision the stream and
-consumer itself, lazily, on the first `send()`/`get()`. Setup runs at most once per transport instance.
-It defaults to **`false`**, so unless you opt in, provisioning stays explicit (no hidden
-stream/consumer creation on the hot path).
+consumer itself, lazily, on the first `send()`/`get()`. Setup then runs once per transport instance, and
+again only if JetStream reports the stream or consumer as missing during a pull (for example after NATS
+removed an idle consumer that hit `inactive_threshold`), or after `close()`. It defaults to **`false`**,
+so unless you opt in, provisioning stays explicit (no hidden stream/consumer creation on the hot path).
 
 ```yaml
 framework:
@@ -726,8 +727,9 @@ framework:
 > **Note on retention & storage:** `stream_retention` and `stream_storage` are fixed when the stream is
 > created - NATS rejects changing either on an existing stream. On the update path the transport
 > preserves the live server values, so changing these options on an already-created stream is a no-op.
-> To change retention or storage, recreate the stream (delete it, then re-run setup / let `auto_setup`
-> recreate it).
+> To change retention or storage, recreate the stream: delete it, then re-run
+> `messenger:setup-transports`. With `auto_setup=true` a running worker recreates it on its next pull,
+> because the missing stream surfaces as a 404 that triggers re-provisioning.
 
 > **Note on `replay_policy`:** the replay policy of a durable consumer is fixed when the consumer is
 > created. NATS rejects an update that changes it, in both directions, so removing the option again does
