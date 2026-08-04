@@ -367,9 +367,10 @@ final class NatsTransportConfigurationBuilder
      * case of the backing enum via $tryFrom, or an InvalidArgumentException naming the allowed values
      * is thrown - turning a typo into a clear configuration error instead of a server rejection.
      *
-     * @param array<string, mixed>            $configuration Merged configuration array
-     * @param callable(string): ?\BackedEnum  $tryFrom       Enum resolver (e.g. RetentionPolicy::tryFrom(...))
-     * @param list<string>                     $allowed       Allowed values, for the error message
+     * @param array<string, mixed>           $configuration Merged configuration array
+     * @param TransportOption                $option        The option key to validate and normalize
+     * @param callable(string): ?\BackedEnum $tryFrom       Enum resolver (e.g. RetentionPolicy::tryFrom(...))
+     * @param list<string>                   $allowed       Allowed values, for the error message
      */
     private function normalizeEnumOption(array &$configuration, TransportOption $option, callable $tryFrom, array $allowed): void
     {
