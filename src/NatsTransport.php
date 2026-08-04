@@ -828,21 +828,21 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
 
         // Retention is set only at creation - NATS rejects changing it on an existing stream, so the
         // update path ({@see buildUpdatedStreamConfiguration()}) preserves the server value instead.
-        $retention = $this->configuration->retention();
+        $retention = $this->configuration->streamRetention();
         if ($retention !== null) {
             $streamConfiguration->retention($retention);
         }
 
-        $discard = $this->configuration->discard();
+        $discard = $this->configuration->streamDiscard();
         if ($discard !== null) {
             $streamConfiguration->discard($discard);
         }
 
-        if ($this->configuration->duplicateWindowSeconds() !== null) {
-            $streamConfiguration->duplicateWindow($this->configuration->duplicateWindowSeconds());
+        if ($this->configuration->streamDuplicateWindowSeconds() !== null) {
+            $streamConfiguration->duplicateWindow($this->configuration->streamDuplicateWindowSeconds());
         }
 
-        $compression = $this->configuration->compression();
+        $compression = $this->configuration->streamCompression();
         if ($compression !== null) {
             // The client models compression as a plain string field, so unwrap the local enum here.
             $streamConfiguration->compression($compression->value);
@@ -852,20 +852,20 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
             $streamConfiguration->description($this->configuration->streamDescription());
         }
 
-        if ($this->configuration->denyDelete() !== null) {
-            $streamConfiguration->denyDelete($this->configuration->denyDelete());
+        if ($this->configuration->streamDenyDelete() !== null) {
+            $streamConfiguration->denyDelete($this->configuration->streamDenyDelete());
         }
 
-        if ($this->configuration->denyPurge() !== null) {
-            $streamConfiguration->denyPurge($this->configuration->denyPurge());
+        if ($this->configuration->streamDenyPurge() !== null) {
+            $streamConfiguration->denyPurge($this->configuration->streamDenyPurge());
         }
 
-        if ($this->configuration->allowDirect() !== null) {
-            $streamConfiguration->allowDirect($this->configuration->allowDirect());
+        if ($this->configuration->streamAllowDirect() !== null) {
+            $streamConfiguration->allowDirect($this->configuration->streamAllowDirect());
         }
 
-        if ($this->configuration->allowRollupHeaders() !== null) {
-            $streamConfiguration->allowRollupHeaders($this->configuration->allowRollupHeaders());
+        if ($this->configuration->streamAllowRollupHeaders() !== null) {
+            $streamConfiguration->allowRollupHeaders($this->configuration->streamAllowRollupHeaders());
         }
 
         if ($this->configuration->isScheduledMessagesEnabled()) {

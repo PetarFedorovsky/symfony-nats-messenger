@@ -152,17 +152,17 @@ final class NatsTransportConfigurationTest extends TestCase
             natsRetryHandlerEnabled: false,
         );
 
-        self::assertSame(RetentionPolicy::WorkQueue, $configuration->retention());
-        self::assertSame(DiscardPolicy::New, $configuration->discard());
-        self::assertSame(30, $configuration->duplicateWindowSeconds());
+        self::assertSame(RetentionPolicy::WorkQueue, $configuration->streamRetention());
+        self::assertSame(DiscardPolicy::New, $configuration->streamDiscard());
+        self::assertSame(30, $configuration->streamDuplicateWindowSeconds());
         self::assertSame(1048576, $configuration->streamMaxMessageSize());
         self::assertSame(4, $configuration->streamMaxConsumers());
-        self::assertSame(StreamCompression::S2, $configuration->compression());
+        self::assertSame(StreamCompression::S2, $configuration->streamCompression());
         self::assertSame('demo stream', $configuration->streamDescription());
-        self::assertTrue($configuration->denyDelete());
-        self::assertTrue($configuration->denyPurge());
-        self::assertTrue($configuration->allowDirect());
-        self::assertFalse($configuration->allowRollupHeaders());
+        self::assertTrue($configuration->streamDenyDelete());
+        self::assertTrue($configuration->streamDenyPurge());
+        self::assertTrue($configuration->streamAllowDirect());
+        self::assertFalse($configuration->streamAllowRollupHeaders());
         self::assertSame(256, $configuration->maxAckPending());
         self::assertSame(2000, $configuration->inactiveThresholdMs());
         self::assertSame(ReplayPolicy::Original, $configuration->replayPolicy());
@@ -178,17 +178,17 @@ final class NatsTransportConfigurationTest extends TestCase
             natsRetryHandlerEnabled: false,
         );
 
-        self::assertNull($configuration->retention());
-        self::assertNull($configuration->discard());
-        self::assertNull($configuration->duplicateWindowSeconds());
+        self::assertNull($configuration->streamRetention());
+        self::assertNull($configuration->streamDiscard());
+        self::assertNull($configuration->streamDuplicateWindowSeconds());
         self::assertNull($configuration->streamMaxMessageSize());
         self::assertNull($configuration->streamMaxConsumers());
-        self::assertNull($configuration->compression());
+        self::assertNull($configuration->streamCompression());
         self::assertNull($configuration->streamDescription());
-        self::assertNull($configuration->denyDelete());
-        self::assertNull($configuration->denyPurge());
-        self::assertNull($configuration->allowDirect());
-        self::assertNull($configuration->allowRollupHeaders());
+        self::assertNull($configuration->streamDenyDelete());
+        self::assertNull($configuration->streamDenyPurge());
+        self::assertNull($configuration->streamAllowDirect());
+        self::assertNull($configuration->streamAllowRollupHeaders());
         self::assertNull($configuration->maxAckPending());
         self::assertNull($configuration->inactiveThresholdMs());
         self::assertNull($configuration->replayPolicy());

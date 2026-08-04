@@ -157,7 +157,7 @@ final readonly class NatsTransportConfiguration
      * {@see NatsTransport::setup()} writes it only when the stream is created and preserves the server
      * value on update. Changing retention on a live stream requires recreating it.
      */
-    public function retention(): ?RetentionPolicy
+    public function streamRetention(): ?RetentionPolicy
     {
         $value = $this->options[TransportOption::STREAM_RETENTION->value] ?? null;
 
@@ -170,7 +170,7 @@ final readonly class NatsTransportConfiguration
      * Determines what JetStream does when a stream limit is reached: discard the oldest messages
      * ({@see DiscardPolicy::Old}) or reject new ones ({@see DiscardPolicy::New}).
      */
-    public function discard(): ?DiscardPolicy
+    public function streamDiscard(): ?DiscardPolicy
     {
         $value = $this->options[TransportOption::STREAM_DISCARD->value] ?? null;
 
@@ -183,7 +183,7 @@ final readonly class NatsTransportConfiguration
      * JetStream ignores a duplicate publish (same Nats-Msg-Id) seen within this window. Validated at
      * build time to never exceed {@see streamMaxAgeSeconds()} when both are set.
      */
-    public function duplicateWindowSeconds(): ?int
+    public function streamDuplicateWindowSeconds(): ?int
     {
         return $this->nullableIntOption(TransportOption::STREAM_DUPLICATE_WINDOW);
     }
@@ -207,7 +207,7 @@ final readonly class NatsTransportConfiguration
     /**
      * Returns the configured stream compression algorithm, or null to leave the server default.
      */
-    public function compression(): ?StreamCompression
+    public function streamCompression(): ?StreamCompression
     {
         $value = $this->options[TransportOption::STREAM_COMPRESSION->value] ?? null;
 
@@ -227,7 +227,7 @@ final readonly class NatsTransportConfiguration
     /**
      * Returns whether stream message deletion is denied, or null to leave the server default untouched.
      */
-    public function denyDelete(): ?bool
+    public function streamDenyDelete(): ?bool
     {
         return $this->nullableBoolOption(TransportOption::STREAM_DENY_DELETE);
     }
@@ -235,7 +235,7 @@ final readonly class NatsTransportConfiguration
     /**
      * Returns whether stream purge is denied, or null to leave the server default untouched.
      */
-    public function denyPurge(): ?bool
+    public function streamDenyPurge(): ?bool
     {
         return $this->nullableBoolOption(TransportOption::STREAM_DENY_PURGE);
     }
@@ -243,7 +243,7 @@ final readonly class NatsTransportConfiguration
     /**
      * Returns whether direct get access is allowed, or null to leave the server default untouched.
      */
-    public function allowDirect(): ?bool
+    public function streamAllowDirect(): ?bool
     {
         return $this->nullableBoolOption(TransportOption::STREAM_ALLOW_DIRECT);
     }
@@ -251,7 +251,7 @@ final readonly class NatsTransportConfiguration
     /**
      * Returns whether rollup headers are allowed, or null to leave the server default untouched.
      */
-    public function allowRollupHeaders(): ?bool
+    public function streamAllowRollupHeaders(): ?bool
     {
         return $this->nullableBoolOption(TransportOption::STREAM_ALLOW_ROLLUP_HEADERS);
     }

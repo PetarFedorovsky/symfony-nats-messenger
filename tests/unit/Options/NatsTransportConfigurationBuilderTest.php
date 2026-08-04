@@ -941,15 +941,15 @@ final class NatsTransportConfigurationBuilderTest extends TestCase
         self::assertSame(10, $configuration->streamMaxConsumers());
         self::assertSame('file', $configuration->streamStorage()->value);
         self::assertSame(1, $configuration->streamReplicas());
-        self::assertSame('limits', $configuration->retention()?->value);
-        self::assertSame('old', $configuration->discard()?->value);
-        self::assertSame(120, $configuration->duplicateWindowSeconds());
-        self::assertSame(StreamCompression::None, $configuration->compression());
+        self::assertSame('limits', $configuration->streamRetention()?->value);
+        self::assertSame('old', $configuration->streamDiscard()?->value);
+        self::assertSame(120, $configuration->streamDuplicateWindowSeconds());
+        self::assertSame(StreamCompression::None, $configuration->streamCompression());
         self::assertSame('my stream', $configuration->streamDescription());
-        self::assertFalse($configuration->denyDelete());
-        self::assertFalse($configuration->denyPurge());
-        self::assertFalse($configuration->allowDirect());
-        self::assertFalse($configuration->allowRollupHeaders());
+        self::assertFalse($configuration->streamDenyDelete());
+        self::assertFalse($configuration->streamDenyPurge());
+        self::assertFalse($configuration->streamAllowDirect());
+        self::assertFalse($configuration->streamAllowRollupHeaders());
         self::assertSame(1000, $configuration->maxAckPending());
         self::assertSame(300000, $configuration->inactiveThresholdMs());
         self::assertSame('instant', $configuration->replayPolicy()?->value);
@@ -1132,17 +1132,17 @@ final class NatsTransportConfigurationBuilderTest extends TestCase
             'auto_setup' => 'true',
         ]);
 
-        self::assertSame(RetentionPolicy::WorkQueue, $config->retention());
-        self::assertSame(DiscardPolicy::New, $config->discard());
-        self::assertSame(30, $config->duplicateWindowSeconds());
+        self::assertSame(RetentionPolicy::WorkQueue, $config->streamRetention());
+        self::assertSame(DiscardPolicy::New, $config->streamDiscard());
+        self::assertSame(30, $config->streamDuplicateWindowSeconds());
         self::assertSame(1048576, $config->streamMaxMessageSize());
         self::assertSame(4, $config->streamMaxConsumers());
-        self::assertSame(StreamCompression::S2, $config->compression());
+        self::assertSame(StreamCompression::S2, $config->streamCompression());
         self::assertSame('demo', $config->streamDescription());
-        self::assertTrue($config->denyDelete());
-        self::assertTrue($config->denyPurge());
-        self::assertTrue($config->allowDirect());
-        self::assertFalse($config->allowRollupHeaders());
+        self::assertTrue($config->streamDenyDelete());
+        self::assertTrue($config->streamDenyPurge());
+        self::assertTrue($config->streamAllowDirect());
+        self::assertFalse($config->streamAllowRollupHeaders());
         self::assertSame(256, $config->maxAckPending());
         self::assertSame(5000, $config->inactiveThresholdMs());
         self::assertSame(ReplayPolicy::Original, $config->replayPolicy());
@@ -1153,14 +1153,14 @@ final class NatsTransportConfigurationBuilderTest extends TestCase
     {
         $config = (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, []);
 
-        self::assertNull($config->retention());
-        self::assertNull($config->discard());
-        self::assertNull($config->duplicateWindowSeconds());
+        self::assertNull($config->streamRetention());
+        self::assertNull($config->streamDiscard());
+        self::assertNull($config->streamDuplicateWindowSeconds());
         self::assertNull($config->streamMaxMessageSize());
         self::assertNull($config->streamMaxConsumers());
-        self::assertNull($config->compression());
+        self::assertNull($config->streamCompression());
         self::assertNull($config->streamDescription());
-        self::assertNull($config->denyDelete());
+        self::assertNull($config->streamDenyDelete());
         self::assertNull($config->maxAckPending());
         self::assertNull($config->inactiveThresholdMs());
         self::assertNull($config->replayPolicy());
@@ -1217,7 +1217,7 @@ final class NatsTransportConfigurationBuilderTest extends TestCase
             'stream_duplicate_window' => 120,
         ]);
 
-        self::assertSame(120, $config->duplicateWindowSeconds());
+        self::assertSame(120, $config->streamDuplicateWindowSeconds());
     }
 
     public function testBuildWithInvalidMaxAckPendingThrowsException(): void
@@ -1295,7 +1295,7 @@ final class NatsTransportConfigurationBuilderTest extends TestCase
             []
         );
 
-        self::assertSame(RetentionPolicy::Interest, $config->retention());
+        self::assertSame(RetentionPolicy::Interest, $config->streamRetention());
         self::assertSame(ReplayPolicy::Original, $config->replayPolicy());
         self::assertTrue($config->isAutoSetupEnabled());
     }
