@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   values have one authoritative definition instead of an allowlist repeated in the validator, the
   accessor docblock and the README. `NatsTransportConfiguration::streamCompression()` returns the enum,
   matching how `stream_retention`, `stream_discard` and `replay_policy` are exposed.
-- **`TypeCoercion::boolValue()`** centralizing the mixed→bool casting policy previously inlined in the
+- **`TypeCoercion::boolValue()`** centralizing the mixed to bool casting policy previously inlined in the
   configuration builder.
 
 ### Fixed
