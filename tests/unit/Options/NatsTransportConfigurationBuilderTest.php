@@ -1210,6 +1210,19 @@ final class NatsTransportConfigurationBuilderTest extends TestCase
         ]);
     }
 
+    public function testBuildAllowsDuplicateWindowEqualToMaxAge(): void
+    {
+        // NATS itself produces this combination: creating a stream with a finite max_age and no
+        // explicit window leaves duplicate_window clamped to exactly max_age, so equal must be valid.
+        $config = (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, [
+            'stream_max_age' => 60,
+            'stream_duplicate_window' => 60,
+        ]);
+
+        self::assertSame(60, $config->streamDuplicateWindowSeconds());
+        self::assertSame(60, $config->streamMaxAgeSeconds());
+    }
+
     public function testBuildAllowsDuplicateWindowWhenMaxAgeIsUnlimited(): void
     {
         $config = (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, [
