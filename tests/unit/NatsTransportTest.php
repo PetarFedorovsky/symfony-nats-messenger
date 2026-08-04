@@ -1122,6 +1122,10 @@ final class NatsTransportTest extends TestCase
         $jetStream->expects(self::once())
             ->method('addStream')
             ->willReturn(Future::complete());
+        // The consumer does not exist yet, so replay_policy is safe to write.
+        $jetStream->expects(self::once())
+            ->method('getConsumer')
+            ->willReturn(Future::error(new JetStreamException('consumer not found', 404)));
         $jetStream->expects(self::once())
             ->method('addConsumer')
             ->with('test-stream', self::consumerConfigEquals([
@@ -1146,6 +1150,136 @@ final class NatsTransportTest extends TestCase
             'replay_policy' => 'original',
         ]);
         $transport->setJetStreamContext($jetStream);
+
+        $transport->setup();
+    }
+
+    public function testSetupSkipsReplayPolicyWhenExistingConsumerUsesADifferentOne(): void
+    {
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->expects(self::once())
+            ->method('addStream')
+            ->willReturn(Future::complete());
+        $jetStream->expects(self::once())
+            ->method('getConsumer')
+            ->with('test-stream', 'client')
+            ->willReturn(Future::complete(new ConsumerInfo(
+                streamName: 'test-stream',
+                name: 'client',
+                push: false,
+                raw: ['config' => [
+                    'ack_policy' => 'explicit',
+                    'deliver_policy' => 'all',
+                    'filter_subject' => 'test-topic',
+                    'replay_policy' => 'instant',
+                ]],
+            )));
+        $jetStream->expects(self::once())
+            ->method('addConsumer')
+            ->with('test-stream', self::callback(static function (ConsumerConfiguration $configuration): bool {
+                // NATS would reject an update that changes the replay policy, so the field must be
+                // absent from the payload entirely rather than sent with the requested value.
+                return !array_key_exists('replay_policy', $configuration->toArray());
+            }))
+            ->willReturn(Future::complete(new ConsumerInfo(
+                streamName: 'test-stream',
+                name: 'client',
+                push: false,
+                raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+            )));
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, ['replay_policy' => 'original']);
+        $transport->setJetStreamContext($jetStream);
+
+        $transport->setup();
+    }
+
+    public function testSetupWritesReplayPolicyWhenExistingConsumerAlreadyMatches(): void
+    {
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->expects(self::once())
+            ->method('addStream')
+            ->willReturn(Future::complete());
+        $jetStream->expects(self::once())
+            ->method('getConsumer')
+            ->willReturn(Future::complete(new ConsumerInfo(
+                streamName: 'test-stream',
+                name: 'client',
+                push: false,
+                raw: ['config' => [
+                    'ack_policy' => 'explicit',
+                    'deliver_policy' => 'all',
+                    'filter_subject' => 'test-topic',
+                    'replay_policy' => 'original',
+                ]],
+            )));
+        $jetStream->expects(self::once())
+            ->method('addConsumer')
+            ->with('test-stream', self::callback(static function (ConsumerConfiguration $configuration): bool {
+                return ($configuration->toArray()['replay_policy'] ?? null) === 'original';
+            }))
+            ->willReturn(Future::complete(new ConsumerInfo(
+                streamName: 'test-stream',
+                name: 'client',
+                push: false,
+                raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+            )));
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, ['replay_policy' => 'original']);
+        $transport->setJetStreamContext($jetStream);
+
+        $transport->setup();
+    }
+
+    public function testSetupTreatsConsumerWithoutReplayPolicyAsInstant(): void
+    {
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->expects(self::once())
+            ->method('addStream')
+            ->willReturn(Future::complete());
+        // Server reported no replay_policy at all, which means it is on the default 'instant'.
+        $jetStream->expects(self::once())
+            ->method('getConsumer')
+            ->willReturn(Future::complete(new ConsumerInfo(
+                streamName: 'test-stream',
+                name: 'client',
+                push: false,
+                raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+            )));
+        $jetStream->expects(self::once())
+            ->method('addConsumer')
+            ->with('test-stream', self::callback(static function (ConsumerConfiguration $configuration): bool {
+                return ($configuration->toArray()['replay_policy'] ?? null) === 'instant';
+            }))
+            ->willReturn(Future::complete(new ConsumerInfo(
+                streamName: 'test-stream',
+                name: 'client',
+                push: false,
+                raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+            )));
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, ['replay_policy' => 'instant']);
+        $transport->setJetStreamContext($jetStream);
+
+        $transport->setup();
+    }
+
+    public function testSetupRethrowsNon404JetStreamExceptionFromConsumerLookup(): void
+    {
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->expects(self::once())
+            ->method('addStream')
+            ->willReturn(Future::complete());
+        $jetStream->expects(self::once())
+            ->method('getConsumer')
+            ->willReturn(Future::error(new JetStreamException('permissions violation', 403)));
+        $jetStream->expects(self::never())->method('addConsumer');
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, ['replay_policy' => 'original']);
+        $transport->setJetStreamContext($jetStream);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('permissions violation');
 
         $transport->setup();
     }

@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configuration builder.
 
 ### Fixed
+- **`replay_policy` no longer breaks `setup()` on an existing durable consumer.** NATS refuses to change
+  a consumer's replay policy, in both directions, so adding `replay_policy` to the DSN of a running
+  deployment made every `setup()` (and, with `auto_setup`, every `send()`/`get()`) fail with "replay
+  policy can not be updated", unrecoverably. The transport now looks up the consumer first and sends the
+  field only when the consumer does not exist yet or already uses the requested value.
 - **`stream_max_consumers` no longer breaks `setup()` on an existing stream.** The update payload used to
   write `max_consumers` unconditionally, falling back to the unlimited sentinel `-1` when the option was
   unset. NATS servers up to and including 2.11 reject any change to that field, so

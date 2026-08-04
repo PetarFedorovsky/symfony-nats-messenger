@@ -13,6 +13,7 @@ use IDCT\NATS\JetStream\Configuration\ConsumerConfiguration;
 use IDCT\NATS\JetStream\Configuration\StreamConfiguration;
 use IDCT\NATS\JetStream\Enum\AckPolicy;
 use IDCT\NATS\JetStream\Enum\DeliverPolicy;
+use IDCT\NATS\JetStream\Enum\ReplayPolicy;
 use IDCT\NATS\JetStream\JetStreamContext;
 use IDCT\NATS\JetStream\Models\ConsumerInfo;
 use IDCT\NATS\JetStream\Models\StreamInfo;
@@ -488,7 +489,7 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
             }
 
             $replayPolicy = $this->configuration->replayPolicy();
-            if ($replayPolicy !== null) {
+            if ($replayPolicy !== null && $this->canApplyReplayPolicy($replayPolicy)) {
                 $consumerConfiguration->replayPolicy($replayPolicy);
             }
 
@@ -623,6 +624,54 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
 
         if ($consumerInfo->push) {
             throw new RuntimeException('Consumer must be configured as a pull consumer.');
+        }
+    }
+
+    /**
+     * Tells whether the configured replay policy can safely be written to the durable consumer.
+     *
+     * NATS refuses to change the replay policy of an existing durable consumer ("replay policy can not
+     * be updated"), and it refuses in both directions: once a consumer is created with `original`,
+     * dropping the option again does not restore `instant` either, because the server then sees a
+     * change back to its default. A mismatch is therefore not repairable through configuration - the
+     * consumer has to be deleted and recreated.
+     *
+     * To keep setup() idempotent on a live deployment, the field is sent only when the consumer does
+     * not exist yet or already has the requested value. Changing replay_policy in the DSN of a running
+     * deployment is a no-op until the consumer is recreated, which mirrors how stream_retention is
+     * handled on the stream update path.
+     */
+    private function canApplyReplayPolicy(ReplayPolicy $replayPolicy): bool
+    {
+        $existingConsumer = $this->getExistingConsumer();
+        if ($existingConsumer === null) {
+            return true;
+        }
+
+        /** @var array<string, mixed> $config */
+        $config = is_array($existingConsumer->raw['config'] ?? null) ? $existingConsumer->raw['config'] : [];
+
+        // A consumer that reports no replay_policy at all is on the server default, which is 'instant'.
+        $currentPolicy = $config['replay_policy'] ?? ReplayPolicy::Instant->value;
+
+        return $currentPolicy === $replayPolicy->value;
+    }
+
+    /**
+     * Returns the existing durable consumer, or null when it does not exist.
+     *
+     * Mirrors {@see getExistingStream()}: a 404 means the consumer is absent, anything else propagates.
+     */
+    private function getExistingConsumer(): ?ConsumerInfo
+    {
+        try {
+            return $this->jetStream()->getConsumer($this->streamName, $this->configuration->consumer())->await();
+        } catch (JetStreamException $exception) {
+            if ($exception->getCode() === 404) {
+                return null;
+            }
+
+            throw $exception;
         }
     }
 

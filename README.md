@@ -259,6 +259,9 @@ framework:
           inactive_threshold: 300           # Seconds of no pull activity before NATS removes the
                                             # durable consumer (null = server default).
           replay_policy: 'instant'          # instant|original (default: null = server default 'instant')
+                                            # ⚠️ Immutable once the durable consumer exists: NATS rejects
+                                            # the change, so the transport skips it and the option only
+                                            # takes effect on a freshly created consumer.
 
           # Stream Retention Policies
           stream_max_age: 86400             # Max message age in seconds (0 = unlimited, default: 0)
@@ -725,6 +728,12 @@ framework:
 > preserves the live server values, so changing these options on an already-created stream is a no-op.
 > To change retention or storage, recreate the stream (delete it, then re-run setup / let `auto_setup`
 > recreate it).
+
+> **Note on `replay_policy`:** the replay policy of a durable consumer is fixed when the consumer is
+> created. NATS rejects an update that changes it, in both directions, so removing the option again does
+> not undo it either. The transport therefore sends `replay_policy` only when the consumer does not exist
+> yet or already uses the requested value; changing it on a running deployment is a no-op until you
+> delete the consumer and let setup recreate it.
 
 > **Note on `stream_max_consumers`:** NATS servers up to and including 2.11 also refuse to change
 > `max_consumers` on an existing stream. The transport therefore writes it only when you set the option
