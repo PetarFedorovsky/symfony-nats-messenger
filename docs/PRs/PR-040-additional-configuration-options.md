@@ -3,8 +3,9 @@
 - **Author:** [Petar Fedorovsky](https://github.com/ideaconnect/symfony-nats-messenger/pull/40) (sofascore)
 - **Branch:** `main` (contributor fork) → `ideaconnect:main`
 - **PR:** https://github.com/ideaconnect/symfony-nats-messenger/pull/40
-- **Status:** Open - local review completed 2026-08-04; all findings fixed on the internal branch
-  `pr-40-fixes` (15 commits on top of `eded4d1`), pending decision on how to land them
+- **Status:** Open - reviewed and fixed on the internal branch `pr-40-fixes`, then re-reviewed for
+  correctness, which found three of the fixes themselves to be wrong (see Second review). Pending a
+  decision on how to land them.
 - **Reviewed at:** commit `eded4d1`, 12 files, +1039 / -63
 
 ## What the PR Proposes
@@ -256,7 +257,7 @@ or cherry-picked on its own.
 
 | Commit | What |
 |--------|------|
-| `77c3c24` | `max_consumers` is no longer written on the update path unless `stream_max_consumers` is configured. It joins `storage` and `retention` as a field the transport does not manage, since NATS refuses to change it up to 2.11. `max_msg_size` stays authoritative: it was verified mutable on 2.10 and matches the existing contract shared with `max_bytes` and `max_msgs`. |
+| `77c3c24` | `max_consumers` is no longer written on the update path unless `stream_max_consumers` is configured. It joins `storage` and `retention` as a field the transport does not manage, since NATS refuses to change it up to 2.11. (`99ea2d8` later extended the same treatment to `max_msg_size`.) |
 | `4666c12` | `setup()` looks the durable consumer up first and writes `replay_policy` only when the consumer does not exist yet or already uses the requested value. The lookup runs only when the option is configured. |
 
 ### Deferred items, also done
@@ -317,3 +318,47 @@ hypothetical: it happened while developing the branch, and a run that appeared t
 it ended up in the original PR and why it needed reverting twice while this branch was built. It will
 keep appearing in unrelated diffs until it is either excluded from version control or regenerated
 deliberately as its own commit.
+
+## Second review (correctness pass)
+
+The fix branch was then reviewed again, specifically for correctness rather than tidiness, with every
+claim checked against real nats-server 2.10.29 and 2.14.2. That pass found that **three of the fixes
+above were themselves wrong**, each because of an assumption about NATS that turned out to be false.
+They are fixed in `fd1986a`, plus `99ea2d8` and `afa2cf7`.
+
+| What was assumed | What NATS actually does | Fixed in |
+|---|---|---|
+| A missing durable consumer surfaces as **404**, so `auto_setup` can recover from it | It surfaces as **503**: nothing is subscribed to answer the pull. The recovery branch was dead code and `get()` threw instead of healing. 404, 409 and 503 are now all handled | `fd1986a` |
+| Skipping `replay_policy` when it differs is enough | Omitting the field is itself a change request, because the server reads the absent field as its default. A consumer created as `original` broke every later `setup()` once the option was removed | `fd1986a` |
+| `stream_deny_delete` / `stream_deny_purge` are ordinary booleans | They are one-way: NATS can turn them on but never off. The README's own sample value `false` would break `setup()` on any stream that had them set | `fd1986a` |
+| An unset `max_msg_size` should reset to the sentinel, matching `max_bytes` | Those fields have always been transport-managed; `max_msg_size` had not been, so an operator-set cap was silently wiped on upgrade | `99ea2d8` |
+
+Two further problems came out of the same pass:
+
+- **A test that passed for the wrong reason.** The Behat scenario added in `5cb956e` appeared to prove
+  in-process re-provisioning. It did not: `messenger:consume` runs in its own process, so a fresh
+  transport instance provisioned on its first pull and no live instance ever saw the deleted consumer.
+  The scenario is renamed to describe the worker-restart path it actually covers, and the in-process
+  path is unit tested and was verified by hand against a real server.
+- **A surviving mutant.** `infection` found that flipping `>` to `>=` in the duplicate-window validator
+  went undetected, which would have wrongly rejected a window exactly equal to `max_age` - a value
+  nats-server produces itself. Pinned in `afa2cf7`; Covered Code MSI is back to 100%.
+
+### Known behaviour worth stating plainly
+
+Re-provisioning a lost durable consumer redelivers everything the stream still retains, including
+already-acknowledged messages, because the replacement starts at `deliver_policy=all` and the
+acknowledgement state died with the old consumer. Measured: three messages sent, consumed and acked,
+consumer deleted, all three redelivered. Under `workqueue` retention this does not arise. It is inherent
+to losing a durable consumer rather than something `auto_setup` introduces - a restarted worker rebuilds
+the consumer the same way - so it is documented as a README warning rather than "fixed".
+
+### Left for the maintainer
+
+- `tests/functional/config/reference.php` is regenerated by `composer test:functional:setup`, which is
+  how it entered the original PR and why it needed reverting twice here. It will keep polluting
+  unrelated diffs until it is gitignored or regenerated deliberately.
+- `tls_verify_peer` (pre-existing, untouched here) silently coerces an unrecognized value to `false`,
+  which disables peer verification. The four new tri-state flags now reject such values; the older
+  boolean options were deliberately left alone to keep this branch's scope to PR #40, but the TLS one is
+  worth a follow-up issue on its own merits.

@@ -268,10 +268,12 @@ framework:
           stream_max_bytes: 1073741824      # Max storage size in bytes (null = unlimited)
           stream_max_messages: 1000000      # Max number of messages in the stream (null = unlimited)
           stream_max_messages_per_subject: 1000 # Max number of messages retained per subject (null = unlimited)
-          stream_max_message_size: 1048576  # Max size of a single message in bytes (null = unlimited).
+          stream_max_message_size: 1048576  # Max size of a single message in bytes.
                                             # Must be a positive integer, at most 2147483647.
-                                            # When left unset the transport keeps whatever limit the
-                                            # stream already has, rather than clearing it.
+                                            # Unset means "leave it to the server": a new stream gets
+                                            # JetStream's unlimited default, and an existing stream
+                                            # keeps whatever limit it already has. To lift a limit on
+                                            # an existing stream, change it in NATS directly.
           stream_max_consumers: 10          # Max consumers allowed on the stream (null = unlimited)
                                             # ⚠️ NATS up to 2.11 refuses to change this on an existing
                                             # stream. When left unset the transport keeps whatever the
@@ -286,6 +288,11 @@ framework:
           stream_duplicate_window: 120      # De-duplication window in seconds (null = server default).
                                             # Must be a positive integer; 0 is rejected because NATS
                                             # would substitute its own 2-minute default.
+                                            # ⚠️ NATS forbids a window larger than a finite max age, so
+                                            # lowering stream_max_age below the stream's current window
+                                            # rewrites the window down to match (the server does the
+                                            # same at creation time). Raising stream_max_age again does
+                                            # not restore it - set this option explicitly to do that.
                                             # Must not exceed stream_max_age when that is set.
 
           # Storage Backend
