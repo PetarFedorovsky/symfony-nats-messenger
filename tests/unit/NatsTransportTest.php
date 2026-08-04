@@ -16,6 +16,7 @@ use IDCT\NATS\JetStream\Models\StreamInfo;
 use IDCT\NatsMessenger\NatsTransport;
 use InvalidArgumentException;
 use LogicException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Messenger\Envelope;
 use Symfony\Component\Messenger\Stamp\DelayStamp;
@@ -1116,6 +1117,79 @@ final class NatsTransportTest extends TestCase
         $transport->setup();
     }
 
+    /**
+     * The four tri-state stream flags are all booleans, so a single set of values cannot prove they are
+     * wired to the right fields: any two flags sharing a value could be swapped undetectably. These two
+     * runs give every flag a unique true/false signature across the pair, so any cross-wiring shows up
+     * in at least one of them.
+     *
+     * @param array<string, bool> $flags
+     * @param array<string, bool> $expected
+     */
+    #[DataProvider('triStateStreamFlagProvider')]
+    public function testSetupPassesEachTriStateStreamFlagIndependently(array $flags, array $expected): void
+    {
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->expects(self::once())
+            ->method('addStream')
+            ->with(self::streamConfigEquals($expected + [
+                'storage' => 'file',
+                'num_replicas' => 1,
+                'name' => 'test-stream',
+                'subjects' => ['test-topic'],
+            ]))
+            ->willReturn(Future::complete());
+        $jetStream->expects(self::once())
+            ->method('addConsumer')
+            ->willReturn(Future::complete(new ConsumerInfo(
+                streamName: 'test-stream',
+                name: 'client',
+                push: false,
+                raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+            )));
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, $flags);
+        $transport->setJetStreamContext($jetStream);
+
+        $transport->setup();
+    }
+
+    /**
+     * @return iterable<string, array{array<string, bool>, array<string, bool>}>
+     */
+    public static function triStateStreamFlagProvider(): iterable
+    {
+        yield 'deny flags on, allow flags off' => [
+            [
+                'stream_deny_delete' => true,
+                'stream_deny_purge' => true,
+                'stream_allow_direct' => false,
+                'stream_allow_rollup_headers' => false,
+            ],
+            [
+                'deny_delete' => true,
+                'deny_purge' => true,
+                'allow_direct' => false,
+                'allow_rollup_hdrs' => false,
+            ],
+        ];
+
+        yield 'alternating so every flag differs from the previous run' => [
+            [
+                'stream_deny_delete' => true,
+                'stream_deny_purge' => false,
+                'stream_allow_direct' => true,
+                'stream_allow_rollup_headers' => false,
+            ],
+            [
+                'deny_delete' => true,
+                'deny_purge' => false,
+                'allow_direct' => true,
+                'allow_rollup_hdrs' => false,
+            ],
+        ];
+    }
+
     public function testSetupPassesNewConsumerOptions(): void
     {
         $jetStream = $this->createMock(JetStreamContext::class);
@@ -1351,6 +1425,117 @@ final class NatsTransportTest extends TestCase
 
         $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, [], $serializer);
         $transport->setJetStreamContext($jetStream);
+
+        $transport->send(new Envelope(new \stdClass()));
+    }
+
+    public function testAutoSetupProvisionsBeforeTheFirstPublish(): void
+    {
+        $serializer = $this->createMock(SerializerInterface::class);
+        $serializer->method('encode')->willReturn(['body' => 'encoded']);
+
+        // Recording the order matters: provisioning that runs *after* the publish would still satisfy
+        // simple call-count expectations while defeating the entire point of auto_setup.
+        $calls = [];
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->method('addStream')->willReturnCallback(static function () use (&$calls) {
+            $calls[] = 'addStream';
+
+            return Future::complete();
+        });
+        $jetStream->method('addConsumer')->willReturnCallback(static function () use (&$calls) {
+            $calls[] = 'addConsumer';
+
+            return Future::complete(new ConsumerInfo(
+                streamName: 'test-stream',
+                name: 'client',
+                push: false,
+                raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+            ));
+        });
+        $jetStream->method('publish')->willReturnCallback(static function () use (&$calls) {
+            $calls[] = 'publish';
+
+            return Future::complete();
+        });
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, ['auto_setup' => true], $serializer);
+        $transport->setJetStreamContext($jetStream);
+
+        $transport->send(new Envelope(new \stdClass()));
+
+        self::assertSame(['addStream', 'addConsumer', 'publish'], $calls);
+    }
+
+    public function testAutoSetupProvisionsBeforeTheFirstFetch(): void
+    {
+        $calls = [];
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->method('addStream')->willReturnCallback(static function () use (&$calls) {
+            $calls[] = 'addStream';
+
+            return Future::complete();
+        });
+        $jetStream->method('addConsumer')->willReturnCallback(static function () use (&$calls) {
+            $calls[] = 'addConsumer';
+
+            return Future::complete(new ConsumerInfo(
+                streamName: 'test-stream',
+                name: 'client',
+                push: false,
+                raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+            ));
+        });
+        $jetStream->method('fetchBatch')->willReturnCallback(static function () use (&$calls) {
+            $calls[] = 'fetchBatch';
+
+            return Future::complete([]);
+        });
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, ['auto_setup' => true]);
+        $transport->setJetStreamContext($jetStream);
+
+        iterator_to_array($transport->get());
+
+        self::assertSame(['addStream', 'addConsumer', 'fetchBatch'], $calls);
+    }
+
+    public function testAutoSetupRetriesProvisioningAfterAFailedAttempt(): void
+    {
+        $serializer = $this->createMock(SerializerInterface::class);
+        $serializer->method('encode')->willReturn(['body' => 'encoded']);
+
+        $jetStream = $this->createMock(JetStreamContext::class);
+        // First provisioning attempt fails outright, second succeeds. The done-flag must not be set by
+        // the failed attempt, or the transport would publish to a stream it never created.
+        $jetStream->expects(self::exactly(2))
+            ->method('addStream')
+            ->willReturnOnConsecutiveCalls(
+                Future::error(new JetStreamException('backend unavailable', 500)),
+                Future::complete(),
+            );
+        $jetStream->expects(self::once())
+            ->method('getStream')
+            ->willReturn(Future::error(new JetStreamException('stream not found', 404)));
+        $jetStream->expects(self::once())
+            ->method('addConsumer')
+            ->willReturn(Future::complete(new ConsumerInfo(
+                streamName: 'test-stream',
+                name: 'client',
+                push: false,
+                raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+            )));
+        $jetStream->expects(self::once())->method('publish')->willReturn(Future::complete());
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, ['auto_setup' => true], $serializer);
+        $transport->setJetStreamContext($jetStream);
+
+        try {
+            $transport->send(new Envelope(new \stdClass()));
+            self::fail('The first send() was expected to fail while provisioning.');
+        } catch (\RuntimeException $exception) {
+            self::assertStringContainsString('backend unavailable', $exception->getMessage());
+        }
 
         $transport->send(new Envelope(new \stdClass()));
     }
@@ -2843,6 +3028,56 @@ final class NatsTransportTest extends TestCase
         // No stream_max_* options provided, so the previously-configured limits must be reset to
         // JetStream's unlimited sentinels on update rather than preserved from the server config.
         $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, []);
+        $transport->setJetStreamContext($jetStream);
+
+        $transport->setup();
+    }
+
+    public function testSetupUpdatePreservesServerRetentionOverAConfiguredOne(): void
+    {
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $streamInfo = new StreamInfo(
+            name: 'test-stream',
+            subjects: ['test-topic'],
+            raw: [
+                'config' => [
+                    'name' => 'test-stream',
+                    'subjects' => ['test-topic'],
+                    'storage' => 'file',
+                    'retention' => 'limits',
+                ],
+            ],
+        );
+        $jetStream->expects(self::once())
+            ->method('addStream')
+            ->willReturn(Future::error(new JetStreamException('already exists', 0)));
+        $jetStream->expects(self::once())
+            ->method('getStream')
+            ->willReturn(Future::complete($streamInfo));
+        $jetStream->expects(self::once())
+            ->method('updateStream')
+            ->with('test-stream', self::callback(static function (array $options): bool {
+                // The DSN asks for workqueue, the live stream is on limits. NATS rejects a retention
+                // change, so the server value has to win.
+                return ($options['retention'] ?? null) === 'limits';
+            }))
+            ->willReturn(Future::complete());
+        $jetStream->expects(self::once())
+            ->method('addConsumer')
+            ->willReturn(Future::complete(new ConsumerInfo(
+                streamName: 'test-stream',
+                name: 'client',
+                push: false,
+                raw: [
+                    'config' => [
+                        'ack_policy' => 'explicit',
+                        'deliver_policy' => 'all',
+                        'filter_subject' => 'test-topic',
+                    ],
+                ],
+            )));
+
+        $transport = new RuntimeTestableNatsTransport(self::VALID_DSN, ['stream_retention' => 'workqueue']);
         $transport->setJetStreamContext($jetStream);
 
         $transport->setup();
