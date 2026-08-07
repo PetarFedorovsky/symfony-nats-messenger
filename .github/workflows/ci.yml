@@ -129,3 +129,70 @@ jobs:
     - name: Stop NATS server
       if: always()
       run: composer nats:stop
+
+  # The matrix above runs against nats:alpine (latest). Several JetStream stream and consumer fields
+  # are immutable on older servers and mutable on newer ones, so a latest-only matrix cannot see a
+  # change that breaks setup() for users on the oldest server the README supports (^2.9). This job
+  # runs the functional suite against that server. Scheduled messages need 2.12, so @delayed is
+  # excluded here rather than failing for a documented reason.
+  functional-oldest-nats:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Job-level, not step-level: the Behat context starts NATS itself with a plain
+    # `docker compose up -d` whenever it finds port 4222 closed. Without NATS_IMAGE in the
+    # environment that child process would recreate the containers from the default (latest)
+    # image, and the job would quietly test the wrong server while still reporting success.
+    env:
+      NATS_IMAGE: nats:2.10-alpine
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v7
+
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: 8.2
+        extensions: igbinary, json, mbstring
+        coverage: none
+        tools: composer:v2
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y netcat-openbsd
+
+    - name: Install dependencies
+      run: composer install --prefer-dist --no-progress
+
+    - name: Start NATS servers (oldest supported)
+      run: |
+        composer nats:start
+        sleep 10
+        timeout 60 bash -c 'until nc -z localhost 4222; do sleep 2; done'
+        timeout 60 bash -c 'until nc -z localhost 4223; do sleep 2; done'
+        timeout 60 bash -c 'until nc -z localhost 4224; do sleep 2; done'
+        docker exec nats_test nats-server --version
+
+    - name: Set up functional tests
+      run: composer test:functional:setup
+
+    - name: Run functional tests without the scheduled-message scenarios
+      working-directory: tests/functional
+      run: ./vendor/bin/behat --no-colors --tags '~@delayed'
+
+    # Belt and braces for the same hazard: if anything recreated the containers from the default
+    # image mid-run, the suite above proved nothing about the oldest supported server.
+    - name: Verify the suite really ran against the oldest supported server
+      run: |
+        VERSION=$(docker exec nats_test nats-server --version)
+        echo "$VERSION"
+        echo "$VERSION" | grep -q ' v2\.10\.' || {
+          echo "::error::Expected a v2.10.x server, got: $VERSION"
+          exit 1
+        }
+
+    - name: Stop NATS server
+      if: always()
+      run: composer nats:stop

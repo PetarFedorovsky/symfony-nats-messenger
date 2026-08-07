@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **New stream configuration DSN options** exposing JetStream stream settings the underlying client
+  already supports but the transport did not surface: `stream_retention` (`limits`|`interest`|`workqueue`),
+  `stream_discard` (`old`|`new`), `stream_duplicate_window` (seconds), `stream_max_message_size` (bytes),
+  `stream_max_consumers`, `stream_compression` (`none`|`s2`), `stream_description`, and the access-policy
+  flags `stream_deny_delete`, `stream_deny_purge`, `stream_allow_direct`, `stream_allow_rollup_headers`.
+  Enum-backed options are validated with clear errors (like `retry_handler`); numeric options reuse the
+  existing validators and require a positive integer, since `null` already means unlimited.
+- **New consumer configuration DSN options**: `max_ack_pending`, `inactive_threshold` (seconds), and
+  `replay_policy` (`instant`|`original`).
+- **`auto_setup` option**, named after the Symfony AMQP transport's option of the same name. When
+  enabled, the transport provisions the stream and consumer once, lazily, on the first `send()`/`get()`
+  instead of requiring `messenger:setup-transports`. Unlike the AMQP transport, it defaults to `false`,
+  which preserves existing behavior.
+- **`stream_retention` is written only at stream creation.** NATS rejects changing the retention policy
+  of an existing stream, so on the update path the transport preserves the live server value and a
+  changed `stream_retention` is ignored until the stream is recreated. (`stream_storage` already behaved
+  this way before this release.)
+- **Build-time validation that `stream_duplicate_window` does not exceed a finite `stream_max_age`**,
+  with a clear error instead of an opaque server rejection at setup time.
+- **Consistent naming for the new stream accessors on `NatsTransportConfiguration`.** The stream-scoped
+  getters carry the `stream` prefix every other stream accessor on the class already uses:
+  `streamRetention()`, `streamDiscard()`, `streamDuplicateWindowSeconds()`, `streamCompression()`,
+  `streamDenyDelete()`, `streamDenyPurge()`, `streamAllowDirect()` and `streamAllowRollupHeaders()`.
+  The consumer-scoped getters (`maxAckPending()`, `inactiveThresholdMs()`, `replayPolicy()`) keep their
+  unprefixed names, matching `consumer()`, `ackWaitMs()` and `maxDeliver()`. None of these names have
+  been released.
+- **`StreamCompression` enum** (`none`|`s2`) backing the `stream_compression` option, so the allowed
+  values have one authoritative definition instead of an allowlist repeated in the validator, the
+  accessor docblock and the README. `NatsTransportConfiguration::streamCompression()` returns the enum,
+  matching how `stream_retention`, `stream_discard` and `replay_policy` are exposed.
+- **`TypeCoercion::boolValue()`** centralizing the mixed to bool casting policy previously inlined in the
+  configuration builder.
+
+### Fixed
+- **Tightened validation of the new numeric options.** `stream_max_message_size` and
+  `stream_duplicate_window` now require a positive integer instead of a non-negative one: they default
+  to `null`, which already means "unlimited" / "server default", so an explicit `0` only looked like the
+  option had been ignored (NATS reads `max_msg_size: 0` as unlimited and replaces a `0` duplicate window
+  with its own 2-minute default). `stream_max_message_size` is additionally capped at `2147483647`,
+  since the server stores it as a 32-bit integer and a larger value failed inside `setup()` with a raw
+  Go unmarshal error. `stream_description` is checked against the server's 4096-character limit.
+- **The stream update path clamps an inherited de-duplication window to a lowered `stream_max_age`.**
+  NATS rejects a stream whose `duplicate_window` exceeds a finite `max_age`, and the window is normally
+  inherited from the live stream, so lowering `stream_max_age` on a stream sitting on the server's
+  2-minute default window failed at setup with "duplicates window can not be larger then max age". The
+  build-time check cannot catch this, since it only compares options the caller supplied. The update
+  payload now clamps the window the same way the server does when a stream is created.
+- **`auto_setup` now re-provisions when JetStream reports the stream or consumer as missing.** The
+  one-shot flag was latched for the lifetime of the transport object, so a consumer that NATS removed
+  after `inactive_threshold` left the worker unable to pull. A missing resource now triggers one
+  re-provisioning attempt and a single retry, and `close()` clears the flag so a reopened connection
+  verifies provisioning again. The statuses that count as "missing" are 404, 409 and **503**: a deleted
+  durable leaves nothing subscribed to answer the pull, which surfaces as 503, not 404. Without
+  `auto_setup` the historical contract is unchanged: 404 and 408 read as an empty queue and everything
+  else propagates.
+  Note that a replacement consumer starts from `deliver_policy=all`, so it redelivers everything the
+  stream still retains, including acknowledged messages under the default `limits` retention. See the
+  warning in the README: this is inherent to losing a durable consumer, not to `auto_setup`.
+- **`stream_deny_delete` and `stream_deny_purge` are never cancelled on an existing stream.** NATS can
+  turn both on but never off, so a stream that already denies deletes or purges would fail every
+  `setup()` once the option was present as `false` - which is the value the README itself shows. The
+  update path now keeps the server's value for those two. `stream_allow_direct` and
+  `stream_allow_rollup_headers` were measured to be freely mutable and stay changeable.
+- **The four tri-state stream flags reject unrecognized values.** `stream_deny_delete=maybe` used to
+  coerce to `false` and be written to the server as a deliberate instruction; it is now a configuration
+  error, consistent with the enum-backed options.
+- **`replay_policy` no longer breaks `setup()` on an existing durable consumer.** NATS refuses to change
+  a consumer's replay policy, in both directions, so adding `replay_policy` to the DSN of a running
+  deployment made every `setup()` (and, with `auto_setup`, every `send()`/`get()`) fail with "replay
+  policy can not be updated", unrecoverably. Removing the option again did not help: the omitted field
+  reads as a change back to the server default and is rejected just the same. The transport now looks
+  the consumer up and always writes its existing replay policy, applying the configured value only to a
+  consumer that does not exist yet.
+- **`stream_max_consumers` and `stream_max_message_size` no longer clobber an existing stream.** The
+  update payload used to write `max_consumers` and `max_msg_size` unconditionally, falling back to the
+  unlimited sentinel `-1` when the options were unset. Neither field was written at all before these
+  options existed, so both are fields an operator may have set out of band on a live stream. For
+  `max_consumers` the consequence was severe: NATS up to and including 2.11 rejects any change to it, so
+  `messenger:setup-transports` failed permanently for anyone whose stream had a consumer limit, and on
+  2.12 and newer the limit was silently cleared. `max_msg_size` is mutable everywhere, so it failed
+  quietly instead: a stream capped at 1 MiB would be reset to unlimited on the next `setup()` with
+  nothing in the output to say so. Both are now written only when the corresponding option is
+  configured; otherwise the live server value is preserved.
+
 ## [5.0.0] - 2026-06-17
 
 This is a **major** release. It is backward-incompatible for two reasons even though the transport's own

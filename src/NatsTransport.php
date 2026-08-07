@@ -13,6 +13,7 @@ use IDCT\NATS\JetStream\Configuration\ConsumerConfiguration;
 use IDCT\NATS\JetStream\Configuration\StreamConfiguration;
 use IDCT\NATS\JetStream\Enum\AckPolicy;
 use IDCT\NATS\JetStream\Enum\DeliverPolicy;
+use IDCT\NATS\JetStream\Enum\ReplayPolicy;
 use IDCT\NATS\JetStream\JetStreamContext;
 use IDCT\NATS\JetStream\Models\ConsumerInfo;
 use IDCT\NATS\JetStream\Models\StreamInfo;
@@ -71,6 +72,9 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
 
     /** Resolved immutable transport configuration (consumer, batching, timeouts, etc.). */
     protected NatsTransportConfiguration $configuration;
+
+    /** Tracks whether the one-shot {@see autoSetupIfEnabled()} provisioning has already run this instance. */
+    private bool $autoSetupDone = false;
 
     /**
      * Creates a transport instance from DSN/options and optional serializer override.
@@ -135,6 +139,8 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
      */
     public function send(Envelope $envelope): Envelope
     {
+        $this->autoSetupIfEnabled();
+
         $uuid = (string) Uuid::v4();
         $envelope = $envelope->with(new TransportMessageIdStamp($uuid));
 
@@ -186,30 +192,31 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
      * Pulls and decodes a batch of envelopes from JetStream.
      *
      * Fetches up to {@see NatsTransportConfiguration::batching()} messages with the
-     * configured timeout. JetStream status 404 (consumer not found) and 408 (timeout / no messages)
-     * are treated as empty results. A message without a reply (ack) subject is skipped
-     * (it can be neither acknowledged nor rejected); a message with an empty payload is
-     * TERMed so JetStream stops redelivering it, since it can never decode into an
+     * configured timeout. JetStream status 404 (stream or consumer lookup failed) and 408
+     * (timeout / no messages) are treated as empty results. A message without a reply (ack)
+     * subject is skipped (it can be neither acknowledged nor rejected); a message with an empty
+     * payload is TERMed so JetStream stops redelivering it, since it can never decode into an
      * envelope. On deserialization failure the message is rejected via
      * {@see handleFailedDelivery()} before the exception propagates.
+     *
+     * With auto_setup enabled, a status that signals a missing stream or consumer (404, 409, or
+     * 503; see {@see recoverFromFetchFailure()} for why all three) additionally triggers one
+     * re-provisioning attempt before the empty result is reported.
      *
      * @return iterable<Envelope>
      */
     public function get(): iterable
     {
+        $this->autoSetupIfEnabled();
+
         try {
-            $messages = $this->jetStream()->fetchBatch(
-                $this->streamName,
-                $this->configuration->consumer(),
-                $this->configuration->batching(),
-                $this->configuration->maxBatchTimeoutMs()
-            )->await();
-        } catch (JetStreamException $e) {
-            if ($e->getCode() === 404 || $e->getCode() === 408) {
+            $messages = $this->fetchBatchMessages();
+        } catch (JetStreamException $exception) {
+            $messages = $this->recoverFromFetchFailure($exception);
+
+            if ($messages === null) {
                 return [];
             }
-
-            throw $e;
         }
 
         foreach ($messages as $message) {
@@ -361,6 +368,11 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
 
         $this->client->disconnect()->await();
         $this->jetStream = null;
+
+        // The next operation reconnects lazily, so let auto_setup verify provisioning once more on the
+        // reopened connection. Without this the flag would stay latched for the lifetime of the object
+        // and a stream removed while the transport was closed would never be recreated.
+        $this->autoSetupDone = false;
     }
 
     /**
@@ -470,6 +482,21 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
                 $consumerConfiguration->backoff($backoffMs);
             }
 
+            $maxAckPending = $this->configuration->maxAckPending();
+            if ($maxAckPending !== null) {
+                $consumerConfiguration->maxAckPending($maxAckPending);
+            }
+
+            $inactiveThresholdMs = $this->configuration->inactiveThresholdMs();
+            if ($inactiveThresholdMs !== null) {
+                $consumerConfiguration->inactiveThreshold($inactiveThresholdMs);
+            }
+
+            $replayPolicy = $this->resolveReplayPolicy();
+            if ($replayPolicy !== null) {
+                $consumerConfiguration->replayPolicy($replayPolicy);
+            }
+
             $consumerInfo = $this->jetStream()->addConsumer($this->streamName, $consumerConfiguration)->await();
             $this->assertConsumerMatchesConfiguration($consumerInfo);
         } catch (UnsupportedFeatureException $unsupportedFeature) {
@@ -492,6 +519,117 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
         }
 
         return $receivedStamp;
+    }
+
+    /**
+     * Provisions the stream and consumer on first use when auto_setup is enabled.
+     *
+     * {@see setup()} runs at most once per transport instance, lazily, from the first
+     * {@see send()}/{@see get()}. A no-op when auto_setup is disabled (the default), so the
+     * stream/consumer must then be provisioned explicitly via `messenger:setup-transports`. The
+     * done-flag is set only after {@see setup()} succeeds, so a transient provisioning failure is
+     * retried on the next call rather than silently skipped.
+     */
+    private function autoSetupIfEnabled(): void
+    {
+        if ($this->autoSetupDone || !$this->configuration->isAutoSetupEnabled()) {
+            return;
+        }
+
+        $this->setup();
+        $this->autoSetupDone = true;
+    }
+
+    /**
+     * Re-runs provisioning after JetStream reported the stream or consumer as missing.
+     *
+     * Only meaningful with auto_setup: that option makes the transport responsible for the stream and
+     * consumer existing, so it also has to cope with them disappearing while the process runs. The
+     * common cause is inactive_threshold, after which NATS removes an idle durable consumer; without
+     * this, a low-traffic worker would keep pulling from a consumer that is gone and report an empty
+     * queue forever.
+     *
+     * Returns false when auto_setup is disabled, in which case provisioning is the operator's job and
+     * the caller should treat the missing resource as an empty result, exactly as before.
+     */
+    private function reprovisionForAutoSetup(): bool
+    {
+        if (!$this->configuration->isAutoSetupEnabled()) {
+            return false;
+        }
+
+        $this->autoSetupDone = false;
+        $this->autoSetupIfEnabled();
+
+        return true;
+    }
+
+    /**
+     * Decides what a failed batch pull means, re-provisioning once when auto_setup owns the resources.
+     *
+     * Returns the messages from a successful retry, or null when the batch should be reported as empty.
+     * Anything it cannot account for is rethrown.
+     *
+     * The status codes matter and are easy to get wrong. A deleted durable consumer does NOT produce a
+     * 404: nothing is subscribed to answer the pull request, so the client reports 503. Measured
+     * directly against nats-server 2.10.29 and 2.14.2 by deleting the consumer and pulling:
+     * "JetStream pull request ended with status 503". 409 is what a consumer deleted mid-pull reports,
+     * and 404 comes from the stream-level lookup. All three mean the same thing to this transport: the
+     * consumer or stream it pulls from is not there.
+     *
+     * @return list<NatsMessage>|null
+     */
+    private function recoverFromFetchFailure(JetStreamException $exception): ?array
+    {
+        $code = $exception->getCode();
+
+        // A pull that timed out simply found no messages.
+        if ($code === 408) {
+            return null;
+        }
+
+        $missingResource = $code === 404 || $code === 409 || $code === 503;
+
+        if ($missingResource && $this->reprovisionForAutoSetup()) {
+            try {
+                return $this->fetchBatchMessages();
+            } catch (JetStreamException $retryException) {
+                // One re-provisioning attempt and one retry. The retry deliberately accepts a narrower
+                // set of codes than the recovery above: setup() just recreated the consumer, so at this
+                // point a 408 is a normal empty pull and a 404 keeps the historical empty-queue read,
+                // but a repeated 503 or 409 no longer means "missing" - it means pulls are failing on a
+                // consumer that verifiably exists, and flattening that into an empty batch would hide
+                // a real outage behind a worker that forever reports nothing to do.
+                if ($retryException->getCode() === 404 || $retryException->getCode() === 408) {
+                    return null;
+                }
+
+                throw $retryException;
+            }
+        }
+
+        // Without auto_setup the operator owns provisioning, so the historical contract stands
+        // unchanged: a missing consumer reads as an empty queue, everything else propagates.
+        if ($code === 404) {
+            return null;
+        }
+
+        throw $exception;
+    }
+
+    /**
+     * Pulls one raw batch from the configured durable consumer.
+     *
+     * @return list<NatsMessage>
+     */
+    private function fetchBatchMessages(): array
+    {
+        return $this->jetStream()->fetchBatch(
+            $this->streamName,
+            $this->configuration->consumer(),
+            $this->configuration->batching(),
+            $this->configuration->maxBatchTimeoutMs()
+        )->await();
     }
 
     /**
@@ -586,6 +724,55 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
     }
 
     /**
+     * Returns the replay policy to write to the durable consumer, or null to leave the field out.
+     *
+     * NATS refuses to change the replay policy of an existing durable consumer ("replay policy can not
+     * be updated"), and it refuses in BOTH directions. Once a consumer exists as `original`, dropping
+     * the option again does not restore `instant`: the transport would then omit the field, the server
+     * would read that as a change back to its default, and reject it just the same. Verified against
+     * nats-server 2.10 and 2.14, where removing the option from a consumer created as `original` fails
+     * every subsequent setup() until the consumer is deleted.
+     *
+     * So the existing consumer's own value always wins, whatever the DSN says. The configured option
+     * applies only to a consumer that does not exist yet, exactly like stream_retention applies only to
+     * a stream that does not exist yet. That keeps setup() idempotent no matter how the option is
+     * changed on a live deployment.
+     */
+    private function resolveReplayPolicy(): ?ReplayPolicy
+    {
+        $existingConsumer = $this->getExistingConsumer();
+        if ($existingConsumer === null) {
+            return $this->configuration->replayPolicy();
+        }
+
+        /** @var array<string, mixed> $config */
+        $config = is_array($existingConsumer->raw['config'] ?? null) ? $existingConsumer->raw['config'] : [];
+        $currentPolicy = $config['replay_policy'] ?? null;
+
+        // A consumer reporting no replay policy is on the server default, so leaving the field out
+        // matches it and avoids sending a value an older server might not understand.
+        return $currentPolicy === null ? null : ReplayPolicy::tryFrom(TypeCoercion::stringValue($currentPolicy));
+    }
+
+    /**
+     * Returns the existing durable consumer, or null when it does not exist.
+     *
+     * Mirrors {@see getExistingStream()}: a 404 means the consumer is absent, anything else propagates.
+     */
+    private function getExistingConsumer(): ?ConsumerInfo
+    {
+        try {
+            return $this->jetStream()->getConsumer($this->streamName, $this->configuration->consumer())->await();
+        } catch (JetStreamException $exception) {
+            if ($exception->getCode() === 404) {
+                return null;
+            }
+
+            throw $exception;
+        }
+    }
+
+    /**
      * Returns the existing stream, or null when it does not exist.
      *
      * Detects existence deterministically via a JetStream stream-info lookup (a 404 means the stream
@@ -662,8 +849,58 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
             $streamConfiguration->maxMsgsPerSubject($this->configuration->streamMaxMessagesPerSubject());
         }
 
+        if ($this->configuration->streamMaxMessageSize() !== null) {
+            $streamConfiguration->maxMsgSize($this->configuration->streamMaxMessageSize());
+        }
+
+        if ($this->configuration->streamMaxConsumers() !== null) {
+            $streamConfiguration->maxConsumers($this->configuration->streamMaxConsumers());
+        }
+
         if ($this->configuration->streamReplicas() > 0) {
             $streamConfiguration->replicas($this->configuration->streamReplicas());
+        }
+
+        // Retention is set only at creation - NATS rejects changing it on an existing stream, so the
+        // update path ({@see buildUpdatedStreamConfiguration()}) preserves the server value instead.
+        $retention = $this->configuration->streamRetention();
+        if ($retention !== null) {
+            $streamConfiguration->retention($retention);
+        }
+
+        $discard = $this->configuration->streamDiscard();
+        if ($discard !== null) {
+            $streamConfiguration->discard($discard);
+        }
+
+        if ($this->configuration->streamDuplicateWindowSeconds() !== null) {
+            $streamConfiguration->duplicateWindow($this->configuration->streamDuplicateWindowSeconds());
+        }
+
+        $compression = $this->configuration->streamCompression();
+        if ($compression !== null) {
+            // The client models compression as a plain string field, so unwrap the local enum here.
+            $streamConfiguration->compression($compression->value);
+        }
+
+        if ($this->configuration->streamDescription() !== null) {
+            $streamConfiguration->description($this->configuration->streamDescription());
+        }
+
+        if ($this->configuration->streamDenyDelete() !== null) {
+            $streamConfiguration->denyDelete($this->configuration->streamDenyDelete());
+        }
+
+        if ($this->configuration->streamDenyPurge() !== null) {
+            $streamConfiguration->denyPurge($this->configuration->streamDenyPurge());
+        }
+
+        if ($this->configuration->streamAllowDirect() !== null) {
+            $streamConfiguration->allowDirect($this->configuration->streamAllowDirect());
+        }
+
+        if ($this->configuration->streamAllowRollupHeaders() !== null) {
+            $streamConfiguration->allowRollupHeaders($this->configuration->streamAllowRollupHeaders());
         }
 
         if ($this->configuration->isScheduledMessagesEnabled()) {
@@ -748,8 +985,58 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
         $updatedConfiguration['max_msgs'] = $this->configuration->streamMaxMessages() ?? -1;
         $updatedConfiguration['max_msgs_per_subject'] = $this->configuration->streamMaxMessagesPerSubject() ?? -1;
 
+        // NATS refuses a stream whose duplicate window is larger than a finite max age. The window is
+        // usually inherited from the live server config (the transport only writes it when
+        // stream_duplicate_window is set), so lowering stream_max_age on a stream that is on the
+        // server's 2-minute default window produces exactly that rejection. The build-time validator
+        // cannot see it, because it only compares options the caller actually supplied. Clamp the
+        // window to the max age here, which is what the server itself does when a stream is created.
+        $maxAgeNanoseconds = TypeCoercion::intValue($updatedConfiguration['max_age']);
+        $duplicateWindowNanoseconds = TypeCoercion::intValue($updatedConfiguration['duplicate_window'] ?? 0);
+        if ($maxAgeNanoseconds > 0 && $duplicateWindowNanoseconds > $maxAgeNanoseconds) {
+            $updatedConfiguration['duplicate_window'] = $maxAgeNanoseconds;
+        }
+
+        // max_consumers and max_msg_size are deliberately NOT in the authoritative list above, because
+        // this transport never wrote either field before these options existed. Both are therefore
+        // fields an operator may have set out of band on a live stream, and resetting them would be a
+        // behaviour change nobody asked for:
+        //
+        //  - max_consumers: NATS up to and including 2.11 refuses to change it at all, so writing the
+        //    unlimited sentinel makes setup() fail permanently for anyone on the ^2.9 range this
+        //    library supports whose stream has a consumer limit, and silently clears it on 2.12+.
+        //  - max_msg_size: mutable on every supported version, so it fails silently rather than
+        //    loudly - a stream capped at 1 MiB by an operator would be reset to unlimited on the next
+        //    setup() run, with nothing in the output to say so.
+        //
+        // Preservation works by echo, not by omission: a field left out of a STREAM.UPDATE payload is
+        // read as the Go zero value and reset (verified against nats-server), so the values survive
+        // only because getStream() returns them in $serverConfiguration and the array_merge above
+        // carries them through. When either option IS configured it arrives via $managedOptions and
+        // wins, which is what makes the options usable on an existing stream.
         if (array_key_exists('storage', $serverConfiguration)) {
             $updatedConfiguration['storage'] = $serverConfiguration['storage'];
+        }
+
+        // Retention, like storage, is immutable on an existing stream: NATS rejects an update that
+        // changes it. Preserve the server's value so update never attempts the change - a different
+        // stream_retention in the DSN is silently ignored on an existing stream; recreate the stream to
+        // change it. buildManagedStreamConfiguration() sets retention only at creation time.
+        if (array_key_exists('retention', $serverConfiguration)) {
+            $updatedConfiguration['retention'] = $serverConfiguration['retention'];
+        }
+
+        // deny_delete and deny_purge can be switched on but never off: NATS rejects an update that
+        // cancels either one ("stream configuration update can not cancel deny message deletes" /
+        // "... can not cancel deny purge"), on every supported version. Since the README shows
+        // stream_deny_delete: false as a sample value, a stream that has the flag set would otherwise
+        // fail every setup() from then on. Keep the server's value whenever it is already denied.
+        // allow_direct and allow_rollup_hdrs were measured to be freely mutable in both directions, so
+        // they stay with the array_merge above and remain changeable.
+        foreach (['deny_delete', 'deny_purge'] as $oneWayFlag) {
+            if (($serverConfiguration[$oneWayFlag] ?? false) === true) {
+                $updatedConfiguration[$oneWayFlag] = true;
+            }
         }
 
         // Preserve the existing replica count unless stream_replicas was explicitly configured.

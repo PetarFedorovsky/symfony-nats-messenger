@@ -4,9 +4,13 @@ namespace IDCT\NatsMessenger\Tests\Unit\Options;
 
 use IDCT\NATS\Connection\NatsOptions;
 use IDCT\NATS\Core\NatsClient;
+use IDCT\NATS\JetStream\Enum\DiscardPolicy;
+use IDCT\NATS\JetStream\Enum\ReplayPolicy;
+use IDCT\NATS\JetStream\Enum\RetentionPolicy;
 use IDCT\NatsMessenger\Options\NatsTransportConfiguration;
 use IDCT\NatsMessenger\Options\NatsTransportConfigurationBuilder;
 use IDCT\NatsMessenger\Options\RetryHandler;
+use IDCT\NatsMessenger\Options\StreamCompression;
 use IDCT\NatsMessenger\Options\TransportOption;
 use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -903,11 +907,26 @@ final class NatsTransportConfigurationBuilderTest extends TestCase
                 'stream_max_bytes' => 1073741824,
                 'stream_max_messages' => 1000000,
                 'stream_max_messages_per_subject' => 1000,
+                'stream_max_message_size' => 1048576,
+                'stream_max_consumers' => 10,
                 'stream_storage' => 'file',
                 'stream_replicas' => 1,
+                'stream_retention' => 'limits',
+                'stream_discard' => 'old',
+                'stream_duplicate_window' => 120,
+                'stream_compression' => 'none',
+                'stream_description' => 'my stream',
+                'stream_deny_delete' => false,
+                'stream_deny_purge' => false,
+                'stream_allow_direct' => false,
+                'stream_allow_rollup_headers' => false,
+                'max_ack_pending' => 1000,
+                'inactive_threshold' => 300,
+                'replay_policy' => 'instant',
                 'retry_handler' => 'symfony',
                 'ack_sync' => false,
                 'scheduled_messages' => false,
+                'auto_setup' => false,
             ]
         );
 
@@ -918,11 +937,26 @@ final class NatsTransportConfigurationBuilderTest extends TestCase
         self::assertSame(1073741824, $configuration->streamMaxBytes());
         self::assertSame(1000000, $configuration->streamMaxMessages());
         self::assertSame(1000, $configuration->streamMaxMessagesPerSubject());
+        self::assertSame(1048576, $configuration->streamMaxMessageSize());
+        self::assertSame(10, $configuration->streamMaxConsumers());
         self::assertSame('file', $configuration->streamStorage()->value);
         self::assertSame(1, $configuration->streamReplicas());
+        self::assertSame('limits', $configuration->streamRetention()?->value);
+        self::assertSame('old', $configuration->streamDiscard()?->value);
+        self::assertSame(120, $configuration->streamDuplicateWindowSeconds());
+        self::assertSame(StreamCompression::None, $configuration->streamCompression());
+        self::assertSame('my stream', $configuration->streamDescription());
+        self::assertFalse($configuration->streamDenyDelete());
+        self::assertFalse($configuration->streamDenyPurge());
+        self::assertFalse($configuration->streamAllowDirect());
+        self::assertFalse($configuration->streamAllowRollupHeaders());
+        self::assertSame(1000, $configuration->maxAckPending());
+        self::assertSame(300000, $configuration->inactiveThresholdMs());
+        self::assertSame('instant', $configuration->replayPolicy()?->value);
         self::assertSame(RetryHandler::SYMFONY, $configuration->retryHandler());
         self::assertFalse($configuration->isAckSyncEnabled());
         self::assertFalse($configuration->isScheduledMessagesEnabled());
+        self::assertFalse($configuration->isAutoSetupEnabled());
     }
 
     /**
@@ -1076,5 +1110,231 @@ final class NatsTransportConfigurationBuilderTest extends TestCase
         self::assertSame('audit-consumer', $config->consumer());
         self::assertSame(2592000, $config->streamMaxAgeSeconds());
         self::assertSame(3, $config->streamReplicas());
+    }
+
+    public function testBuildAcceptsAndNormalizesNewStreamAndConsumerOptions(): void
+    {
+        $config = (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, [
+            'stream_retention' => 'WorkQueue',
+            'stream_discard' => 'New',
+            'stream_duplicate_window' => 30,
+            'stream_max_message_size' => 1048576,
+            'stream_max_consumers' => 4,
+            'stream_compression' => 'S2',
+            'stream_description' => 'demo',
+            'stream_deny_delete' => 'true',
+            'stream_deny_purge' => '1',
+            'stream_allow_direct' => 'yes',
+            'stream_allow_rollup_headers' => 'false',
+            'max_ack_pending' => 256,
+            'inactive_threshold' => 5,
+            'replay_policy' => 'Original',
+            'auto_setup' => 'true',
+        ]);
+
+        self::assertSame(RetentionPolicy::WorkQueue, $config->streamRetention());
+        self::assertSame(DiscardPolicy::New, $config->streamDiscard());
+        self::assertSame(30, $config->streamDuplicateWindowSeconds());
+        self::assertSame(1048576, $config->streamMaxMessageSize());
+        self::assertSame(4, $config->streamMaxConsumers());
+        self::assertSame(StreamCompression::S2, $config->streamCompression());
+        self::assertSame('demo', $config->streamDescription());
+        self::assertTrue($config->streamDenyDelete());
+        self::assertTrue($config->streamDenyPurge());
+        self::assertTrue($config->streamAllowDirect());
+        self::assertFalse($config->streamAllowRollupHeaders());
+        self::assertSame(256, $config->maxAckPending());
+        self::assertSame(5000, $config->inactiveThresholdMs());
+        self::assertSame(ReplayPolicy::Original, $config->replayPolicy());
+        self::assertTrue($config->isAutoSetupEnabled());
+    }
+
+    public function testBuildLeavesNewOptionsUnsetByDefault(): void
+    {
+        $config = (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, []);
+
+        self::assertNull($config->streamRetention());
+        self::assertNull($config->streamDiscard());
+        self::assertNull($config->streamDuplicateWindowSeconds());
+        self::assertNull($config->streamMaxMessageSize());
+        self::assertNull($config->streamMaxConsumers());
+        self::assertNull($config->streamCompression());
+        self::assertNull($config->streamDescription());
+        self::assertNull($config->streamDenyDelete());
+        self::assertNull($config->maxAckPending());
+        self::assertNull($config->inactiveThresholdMs());
+        self::assertNull($config->replayPolicy());
+        self::assertFalse($config->isAutoSetupEnabled());
+    }
+
+    public function testBuildWithInvalidRetentionThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("Invalid stream_retention option 'forever'. Allowed values are 'limits', 'interest', 'workqueue'.");
+
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, ['stream_retention' => 'forever']);
+    }
+
+    public function testBuildWithInvalidDiscardThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("Invalid stream_discard option 'both'. Allowed values are 'old', 'new'.");
+
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, ['stream_discard' => 'both']);
+    }
+
+    public function testBuildWithInvalidCompressionThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("Invalid stream_compression option 'gzip'. Allowed values are 'none', 's2'.");
+
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, ['stream_compression' => 'gzip']);
+    }
+
+    public function testBuildWithInvalidReplayPolicyThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("Invalid replay_policy option 'replay'. Allowed values are 'instant', 'original'.");
+
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, ['replay_policy' => 'replay']);
+    }
+
+    public function testBuildWithDuplicateWindowExceedingMaxAgeThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The stream_duplicate_window option (120s) must not exceed stream_max_age (60s)');
+
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, [
+            'stream_max_age' => 60,
+            'stream_duplicate_window' => 120,
+        ]);
+    }
+
+    public function testBuildAllowsDuplicateWindowEqualToMaxAge(): void
+    {
+        // NATS itself produces this combination: creating a stream with a finite max_age and no
+        // explicit window leaves duplicate_window clamped to exactly max_age, so equal must be valid.
+        $config = (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, [
+            'stream_max_age' => 60,
+            'stream_duplicate_window' => 60,
+        ]);
+
+        self::assertSame(60, $config->streamDuplicateWindowSeconds());
+        self::assertSame(60, $config->streamMaxAgeSeconds());
+    }
+
+    public function testBuildAllowsDuplicateWindowWhenMaxAgeIsUnlimited(): void
+    {
+        $config = (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, [
+            'stream_max_age' => 0,
+            'stream_duplicate_window' => 120,
+        ]);
+
+        self::assertSame(120, $config->streamDuplicateWindowSeconds());
+    }
+
+    public function testBuildWithInvalidMaxAckPendingThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The max_ack_pending option must be a positive integer value.');
+
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, ['max_ack_pending' => 0]);
+    }
+
+    public function testBuildWithInvalidStreamMaxConsumersThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The stream_max_consumers option must be a positive integer value.');
+
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, ['stream_max_consumers' => 0]);
+    }
+
+    public function testBuildWithZeroStreamMaxMessageSizeThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The stream_max_message_size option must be a positive integer value.');
+
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, ['stream_max_message_size' => 0]);
+    }
+
+    public function testBuildWithStreamMaxMessageSizeExceedingInt32ThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The stream_max_message_size option must not exceed 2147483647');
+
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, ['stream_max_message_size' => 3000000000]);
+    }
+
+    public function testBuildAcceptsStreamMaxMessageSizeAtTheInt32Boundary(): void
+    {
+        $config = (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, [
+            'stream_max_message_size' => 2147483647,
+        ]);
+
+        self::assertSame(2147483647, $config->streamMaxMessageSize());
+    }
+
+    public function testBuildWithZeroDuplicateWindowThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The stream_duplicate_window option must be a positive integer value.');
+
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, ['stream_duplicate_window' => 0]);
+    }
+
+    public function testBuildWithOverlongStreamDescriptionThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The stream_description option must not exceed 4096 characters (got 4097)');
+
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, [
+            'stream_description' => str_repeat('a', 4097),
+        ]);
+    }
+
+    public function testBuildAcceptsStreamDescriptionAtTheLengthLimit(): void
+    {
+        $config = (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, [
+            'stream_description' => str_repeat('a', 4096),
+        ]);
+
+        self::assertSame(4096, strlen((string) $config->streamDescription()));
+    }
+
+    public function testBuildWithUnrecognizedTriStateBooleanThrowsException(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage("Invalid stream_deny_delete option 'maybe'.");
+
+        // Without validation this would coerce to false and be sent to the server as a deliberate
+        // instruction to allow deletes, rather than being reported as the typo it is.
+        (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, ['stream_deny_delete' => 'maybe']);
+    }
+
+    public function testBuildAcceptsEveryRecognizedBooleanTokenForTriStateFlags(): void
+    {
+        $config = (new NatsTransportConfigurationBuilder())->build(self::VALID_DSN, [
+            'stream_deny_delete' => 'on',
+            'stream_deny_purge' => 'off',
+            'stream_allow_direct' => '1',
+            'stream_allow_rollup_headers' => 'no',
+        ]);
+
+        self::assertTrue($config->streamDenyDelete());
+        self::assertFalse($config->streamDenyPurge());
+        self::assertTrue($config->streamAllowDirect());
+        self::assertFalse($config->streamAllowRollupHeaders());
+    }
+
+    public function testBuildParsesNewOptionsFromDsnQuery(): void
+    {
+        $config = (new NatsTransportConfigurationBuilder())->build(
+            'nats://localhost:4222/test-stream/test-topic?stream_retention=interest&auto_setup=1&replay_policy=original',
+            []
+        );
+
+        self::assertSame(RetentionPolicy::Interest, $config->streamRetention());
+        self::assertSame(ReplayPolicy::Original, $config->replayPolicy());
+        self::assertTrue($config->isAutoSetupEnabled());
     }
 }
