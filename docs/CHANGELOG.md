@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-08-09
+
+A **minor** release. It adds fifteen new DSN options and the `auto_setup` provisioning mode, and fixes
+several ways the stream and consumer update paths could damage or fail against an existing deployment.
+The public PHP API is additive only: new `TransportOption` cases, new accessors on
+`NatsTransportConfiguration`, a new `StreamCompression` enum and a new `TypeCoercion::boolValue()`.
+Nothing released in 5.0.0 was renamed or removed, and the PHP (`^8.2`), Symfony (`^7.2 || ^8`) and
+`idct/php-nats-jetstream-client` (`^2.4`) requirements are unchanged.
+
 ### Added
 - **New stream configuration DSN options** exposing JetStream stream settings the underlying client
   already supports but the transport did not surface: `stream_retention` (`limits`|`interest`|`workqueue`),
