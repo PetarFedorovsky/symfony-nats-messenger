@@ -253,6 +253,13 @@ framework:
           max_batch_timeout: 1.0            # Timeout in seconds for batch fetching (default: 1)
           connection_timeout: 1.0           # Connection (dial) timeout in seconds (default: 1)
 
+          # Connection Resilience
+          reconnect: false                  # Re-dial automatically after the connection drops (default: false)
+                                            # false => the next send()/get() fails and the worker exits
+                                            # true  => the NATS client reconnects with exponential backoff
+          max_reconnect_attempts: null      # Re-dial attempts per outage before giving up
+                                            # (null = the client's own default of 10). Positive integer.
+
           # Consumer Flow Control & Lifecycle
           max_ack_pending: 1000             # Max delivered-but-unacked messages outstanding
                                             # (null = server default). Primary flow-control lever.
@@ -365,7 +372,7 @@ framework:
           nkey: null                        # NKey public value
 ```
 
-> **Tested by:** `testReadmeConfigurationOptionsAreAccepted` (all options above), `testReadmeBatchingExamplesAreAccepted`, `testReadmeTimeoutExamplesAreAccepted`, `testReadmeStreamRetentionExamplesAreAccepted`, `testBuildAcceptsAndNormalizesNewStreamAndConsumerOptions`, `testSetupPassesNewStreamPolicyOptions`, `testSetupPassesNewConsumerOptions`, `testBuildWithTlsAndAuthOptionsPropagatesToNatsOptions`
+> **Tested by:** `testReadmeConfigurationOptionsAreAccepted` (all options above), `testBuildWithReconnectOptionsPropagatesToNatsOptions`, `testReadmeBatchingExamplesAreAccepted`, `testReadmeTimeoutExamplesAreAccepted`, `testReadmeStreamRetentionExamplesAreAccepted`, `testBuildAcceptsAndNormalizesNewStreamAndConsumerOptions`, `testSetupPassesNewStreamPolicyOptions`, `testSetupPassesNewConsumerOptions`, `testBuildWithTlsAndAuthOptionsPropagatesToNatsOptions`
 
 ### Retry Handler Behavior
 
@@ -508,6 +515,36 @@ options:
 - Decrease for faster failure detection in local environments
 - Default of 1 second works well for most local/regional deployments
 - Don't wait forever for the batch to fill
+
+### Automatic Reconnect
+
+By default the transport does **not** reconnect: when the connection to NATS drops, the next `send()` or
+`get()` fails and the worker exits (let your process supervisor restart it). Enable `reconnect` to have
+the NATS client re-dial on its own instead:
+
+```yaml
+options:
+  reconnect: true             # re-dial after a dropped connection (default: false)
+  max_reconnect_attempts: 20  # re-dial attempts per outage (default: null = the client's default of 10)
+```
+
+> **Tested by:** `testBuildLeavesReconnectDisabledByDefault`, `testBuildWithReconnectOptionsPropagatesToNatsOptions`, `testBuildWithReconnectFromDsnQueryString`, `testBuildKeepsTheClientReconnectAttemptDefaultWhenOnlyReconnectIsEnabled`, `testBuildWithInvalidMaxReconnectAttemptsThrowsException`
+
+**What `reconnect: true` does** (all of it inside the NATS client; the transport only switches it on):
+- After the connection is lost the client re-dials with exponential backoff (starting at 100 ms and capped
+  at 10 s, with jitter) and re-establishes its subscriptions.
+- Operations issued while the connection is down wait for the reconnect instead of failing at once,
+  bounded by the client's request timeout. Publishes are buffered and flushed once reconnected.
+- Once `max_reconnect_attempts` is exhausted the client closes the connection for good; the next transport
+  operation throws and the worker exits, exactly as it would without reconnect. Rejected credentials are
+  not retried at all.
+- The same retry loop also covers a failed **initial** connect, so `messenger:setup-transports` against a
+  NATS server that is down keeps re-dialling through all attempts before it fails, instead of failing on
+  the first refused connection.
+
+**When to enable:** long-running workers against a NATS cluster whose nodes restart or fail over. Leave it
+disabled if you rely on the process supervisor to restart the worker on any connection loss, or if you
+want `messenger:setup-transports` to fail fast when NATS is unreachable.
 
 ## Stream Configuration
 

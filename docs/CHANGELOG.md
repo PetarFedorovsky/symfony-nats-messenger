@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`reconnect` and `max_reconnect_attempts` options** for automatic reconnection. The transport used to
+  hard-wire the client's reconnect off, so any dropped connection was terminal for the worker. With
+  `reconnect: true` (default `false`, preserving existing behavior) the NATS client re-dials with its own
+  exponential backoff and re-establishes its subscriptions; `max_reconnect_attempts` (positive integer,
+  default `null` = the client's own default of 10) caps the re-dial attempts per outage. With reconnect
+  enabled the same retry loop also covers a failed initial connect. Both options work from the DSN query
+  string too.
+
 ## [5.1.0] - 2026-08-09
 
 A **minor** release. It adds fifteen new DSN options and the `auto_setup` provisioning mode, and fixes
