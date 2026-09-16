@@ -3,6 +3,7 @@
 namespace IDCT\NatsMessenger\Tests\Unit;
 
 use Amp\Future;
+use IDCT\NATS\Connection\Enum\ConnectionState;
 use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
@@ -799,6 +800,7 @@ final class NatsTransportTest extends TestCase
         $client = $this->createMock(NatsClient::class);
         // Two transport operations must open exactly one connection (lazy connect is cached); a
         // regression that reconnected per operation would open a socket on every send/ack.
+        $client->method('state')->willReturn(ConnectionState::Open);
         $client->expects(self::once())->method('connect')->willReturn(Future::complete());
         $client->expects(self::once())->method('jetStream')->willReturn($jetStream);
 
@@ -1749,6 +1751,7 @@ final class NatsTransportTest extends TestCase
         $jetStream->expects(self::exactly(2))->method('fetchBatch')->willReturn(Future::complete([]));
 
         $client = $this->createMock(NatsClient::class);
+        $client->method('state')->willReturn(ConnectionState::Open);
         $client->expects(self::exactly(2))->method('connect')->willReturn(Future::complete());
         $client->expects(self::exactly(2))->method('jetStream')->willReturn($jetStream);
         $client->expects(self::once())->method('disconnect')->willReturn(Future::complete());
@@ -3845,5 +3848,89 @@ final class NatsTransportTest extends TestCase
         $transport->setJetStreamContext($jetStream);
 
         $transport->setup();
+    }
+
+    /**
+     * A client that reached its terminal Closed state (the first drop with reconnect off, exhausted
+     * attempts with it on, rejected credentials) refuses every request, and a producer dispatching from
+     * inside a handler survives that exception as a handler failure - so the transport must dial again
+     * instead of keeping a dead client for the rest of the process.
+     */
+    public function testSendRedialsWhenTheClientIsClosed(): void
+    {
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->expects(self::exactly(2))->method('publish')->willReturn(Future::complete());
+
+        $state = ConnectionState::Open;
+        $client = $this->createMock(NatsClient::class);
+        $client->method('state')->willReturnCallback(static function () use (&$state): ConnectionState {
+            return $state;
+        });
+        // One dial for the first send(), a second one because the client reports Closed afterwards.
+        $client->expects(self::exactly(2))->method('connect')->willReturn(Future::complete());
+        $client->expects(self::exactly(2))->method('jetStream')->willReturn($jetStream);
+
+        $transport = new RealConnectNatsTransport(self::VALID_DSN, [], new PhpSerializer());
+        $transport->setClient($client);
+
+        $transport->send(new Envelope(new \stdClass()));
+        $state = ConnectionState::Closed;
+        $transport->send(new Envelope(new \stdClass()));
+    }
+
+    public function testSendDoesNotRedialWhileTheClientIsOpen(): void
+    {
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->expects(self::exactly(2))->method('publish')->willReturn(Future::complete());
+
+        $client = $this->createMock(NatsClient::class);
+        $client->method('state')->willReturn(ConnectionState::Open);
+        $client->expects(self::once())->method('connect')->willReturn(Future::complete());
+        $client->expects(self::once())->method('jetStream')->willReturn($jetStream);
+
+        $transport = new RealConnectNatsTransport(self::VALID_DSN, [], new PhpSerializer());
+        $transport->setClient($client);
+
+        $transport->send(new Envelope(new \stdClass()));
+        $transport->send(new Envelope(new \stdClass()));
+    }
+
+    /**
+     * Mirrors {@see testCloseResetsAutoSetupSoTheNextOperationProvisionsAgain}: a re-dial opens a fresh
+     * connection too, so a stream removed during the outage must be recreated rather than trusted.
+     */
+    public function testRedialResetsAutoSetupSoTheNextOperationProvisionsAgain(): void
+    {
+        $consumerInfo = new ConsumerInfo(
+            streamName: 'test-stream',
+            name: 'client',
+            push: false,
+            raw: ['config' => ['ack_policy' => 'explicit', 'deliver_policy' => 'all', 'filter_subject' => 'test-topic']],
+        );
+
+        $jetStream = $this->createMock(JetStreamContext::class);
+        $jetStream->expects(self::exactly(2))->method('addStream')->willReturn(Future::complete());
+        $jetStream->expects(self::exactly(2))->method('addConsumer')->willReturn(Future::complete($consumerInfo));
+        $jetStream->expects(self::exactly(3))->method('fetchBatch')->willReturn(Future::complete([]));
+
+        $state = ConnectionState::Open;
+        $client = $this->createMock(NatsClient::class);
+        $client->method('state')->willReturnCallback(static function () use (&$state): ConnectionState {
+            return $state;
+        });
+        $client->expects(self::exactly(2))->method('connect')->willReturn(Future::complete());
+        $client->expects(self::exactly(2))->method('jetStream')->willReturn($jetStream);
+
+        $transport = new RealConnectNatsTransport(self::VALID_DSN, ['auto_setup' => true]);
+        $transport->setClient($client);
+
+        // First pull: dials and provisions once.
+        iterator_to_array($transport->get());
+        // The client closed meanwhile: the second pull re-dials and drops the latched flag.
+        $state = ConnectionState::Closed;
+        iterator_to_array($transport->get());
+        // The third pull provisions again on the fresh connection instead of trusting the flag.
+        $state = ConnectionState::Open;
+        iterator_to_array($transport->get());
     }
 }

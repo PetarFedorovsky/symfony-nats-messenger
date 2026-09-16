@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace IDCT\NatsMessenger;
 
+use IDCT\NATS\Connection\Enum\ConnectionState;
 use IDCT\NATS\Core\NatsClient;
 use IDCT\NATS\Core\NatsHeaders;
 use IDCT\NATS\Core\NatsMessage;
@@ -635,14 +636,31 @@ class NatsTransport implements TransportInterface, MessageCountAwareInterface, S
     /**
      * Lazily connects to NATS only when transport operations require it.
      *
-     * Called internally by {@see jetStream()} to ensure the connection is
-     * established before any JetStream API call.
+     * Called internally by {@see jetStream()} to ensure the connection is established before any
+     * JetStream API call. Two situations need a dial: no connection was ever opened, and a client that
+     * reached its terminal Closed state - the first transport failure with `reconnect` off, exhausted
+     * `max_reconnect_attempts` with it on, or rejected credentials. The client refuses every request in
+     * that state, and a producer dispatching from inside a message handler survives the resulting
+     * exception (Symfony records it as a handler failure and the worker carries on), so without this
+     * re-dial such a process would keep a dead client for the rest of its lifetime. The client releases
+     * its runtime state on every terminal close precisely so that a fresh connect() starts clean. Any
+     * other state is left alone: Open needs nothing, and Connecting means the client's own recovery is
+     * in flight and must not be raced by a second dial.
      */
     private function connectIfNeeded(): void
     {
-        if ($this->jetStream === null) {
-            $this->connect();
+        if ($this->jetStream !== null && $this->client->state() !== ConnectionState::Closed) {
+            return;
         }
+
+        if ($this->jetStream !== null) {
+            // Re-dialling a closed client opens a fresh connection, so - exactly like close() - let
+            // auto_setup verify provisioning once more: a stream removed during the outage must be
+            // recreated rather than trusted from the latched flag.
+            $this->autoSetupDone = false;
+        }
+
+        $this->connect();
     }
 
     /**

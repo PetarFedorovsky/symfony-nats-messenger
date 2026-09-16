@@ -254,9 +254,10 @@ framework:
           connection_timeout: 1.0           # Connection (dial) timeout in seconds (default: 1)
 
           # Connection Resilience
-          reconnect: false                  # Re-dial automatically after the connection drops (default: false)
-                                            # false => the next send()/get() fails and the worker exits
-                                            # true  => the NATS client reconnects with exponential backoff
+          reconnect: false                  # Let the NATS client re-dial on its own after a drop (default: false)
+                                            # false => the operation in flight fails; the transport dials
+                                            #          again on the next one
+                                            # true  => the client reconnects with exponential backoff first
           max_reconnect_attempts: null      # Re-dial attempts per outage before giving up
                                             # (null = the client's own default of 10). Positive integer.
 
@@ -523,9 +524,10 @@ options:
 
 ### Automatic Reconnect
 
-By default the transport does **not** reconnect: when the connection to NATS drops, the next `send()` or
-`get()` fails and the worker exits (let your process supervisor restart it). Enable `reconnect` to have
-the NATS client re-dial on its own instead:
+By default the NATS client does **not** reconnect on its own: when the connection drops, the operation in
+flight fails with a connection error and the client closes. The transport then dials again on the next
+operation (see "What happens after a drop" below). Enable `reconnect` to have the client re-dial by
+itself, transparently, before anything fails:
 
 ```yaml
 options:
@@ -533,19 +535,38 @@ options:
   max_reconnect_attempts: 20  # re-dial attempts per outage (default: null = the client's default of 10)
 ```
 
-> **Tested by:** `testBuildLeavesReconnectDisabledByDefault`, `testBuildWithReconnectOptionsPropagatesToNatsOptions`, `testBuildWithReconnectFromDsnQueryString`, `testBuildKeepsTheClientReconnectAttemptDefaultWhenOnlyReconnectIsEnabled`, `testBuildWithInvalidMaxReconnectAttemptsThrowsException`
+> **Tested by:** `testBuildLeavesReconnectDisabledByDefault`, `testBuildWithReconnectOptionsPropagatesToNatsOptions`, `testBuildWithReconnectFromDsnQueryString`, `testBuildKeepsTheClientReconnectAttemptDefaultWhenOnlyReconnectIsEnabled`, `testBuildWithInvalidMaxReconnectAttemptsThrowsException`, `testSendRedialsWhenTheClientIsClosed`, `testSendDoesNotRedialWhileTheClientIsOpen`, `testRedialResetsAutoSetupSoTheNextOperationProvisionsAgain`
 
 **What `reconnect: true` does** (all of it inside the NATS client; the transport only switches it on):
 - After the connection is lost the client re-dials with exponential backoff (starting at 100 ms and capped
   at 10 s, with jitter) and re-establishes its subscriptions.
-- Operations issued while the connection is down wait for the reconnect instead of failing at once,
-  bounded by the client's request timeout. Publishes are buffered and flushed once reconnected.
+- A `send()` issued while the client is reconnecting fails immediately with a connection error: a JetStream
+  publish waits for a server acknowledgement, and the client refuses such requests until it is open again.
+  Only fire-and-forget frames (the ACK, NAK and TERM this transport sends) are buffered and flushed once
+  reconnected.
 - Once `max_reconnect_attempts` is exhausted the client closes the connection for good; the next transport
-  operation throws and the worker exits, exactly as it would without reconnect. Rejected credentials are
-  not retried at all.
+  operation dials again (see below). Rejected credentials are not retried at all.
 - The same retry loop also covers a failed **initial** connect, so `messenger:setup-transports` against a
   NATS server that is down keeps re-dialling through all attempts before it fails, instead of failing on
   the first refused connection.
+
+**What happens after a drop, with or without `reconnect`:**
+- The operation that was in flight fails with a connection error. A server-sent `-ERR` (for example
+  `Stale Connection`, which the server sends when the client stopped answering its PINGs) surfaces the
+  same way, once.
+- A **consumer** worker exits, because Symfony's `Worker` does not catch exceptions from `get()`. Let your
+  process supervisor restart it.
+- A **producer** that dispatches from inside a message handler survives: Symfony records the failed
+  dispatch as a handler failure and the worker carries on. Once the client has closed, the transport dials
+  again on the next operation, so the next dispatch succeeds if NATS is reachable. With `reconnect: true`
+  that re-dial goes through the client's retry loop, so while NATS is still down it can take the whole
+  backoff schedule before it fails; with `reconnect: false` it fails after `connection_timeout`.
+- Messages that were delivered but not yet acknowledged when the connection dropped are redelivered by
+  JetStream after `ack_wait`, counting one delivery attempt against `max_deliver`. A reconnect that
+  completes within `ack_wait` therefore costs nothing.
+- Duplicates on the producer side are possible: a publish whose acknowledgement was lost is reported as
+  failed although the server may have stored it, and the client re-sends a frame whose write failed
+  mid-flight. The transport sets no `Nats-Msg-Id`, so `stream_duplicate_window` does not collapse them.
 
 **When to enable:** long-running workers against a NATS cluster whose nodes restart or fail over. Leave it
 disabled if you rely on the process supervisor to restart the worker on any connection loss, or if you
@@ -623,7 +644,21 @@ In a DSN the tags are a comma-separated list: `?stream_placement_tags=ssd,eu-wes
   matters because a JetStream update that omits `placement` clears it, so the transport echoes the live
   value back whenever the options are unset.
 - Setting either option on an existing stream updates its placement, and NATS then moves the stream's
-  replicas onto matching servers. To remove a placement entirely, change it in NATS directly.
+  replicas onto matching servers. The server accepts the new placement and `setup()` returns at once;
+  the replica migration runs in the background (`nats stream info` shows the replicas as not current
+  until it finishes). NATS refuses to change placement and `stream_replicas` in the same update, so stage
+  those two options across two `messenger:setup-transports` runs. To remove a placement entirely, change
+  it in NATS directly.
+- **Exclusion tags and the `unique_tag` bypass (NATS 2.12+).** A tag prefixed with `!` excludes the
+  servers that carry it, for example `!disk:hdd`. The server strips the `!` before it looks at the
+  cluster's `unique_tag` setting, and any placement tag that starts with that configured prefix switches
+  the uniqueness constraint **off** for the stream (nats-server's own comment: "disable uniqueness check
+  if explicitly listed in tags"). So with `unique_tag: "zone:"`, the tag `!zone:ignore` excludes nobody
+  and only lifts the requirement that replicas sit in distinct zones, which lets a 3-replica stream be
+  created on a cluster with fewer than 3 zones. A positive tag that every server carries and that starts
+  with the prefix, such as `zone:any` added to each server's `server_tags`, has the same effect on any
+  server version. On 2.11 and older the `!` is not stripped, so `!zone:ignore` is a mandatory tag nothing
+  matches and creation fails with `tags not matched`.
 - On a clustered server, tags that no server carries make stream creation fail with a JetStream error such
   as `no suitable peers for placement`. A standalone (non-clustered) server accepts and stores any
   placement without acting on it.

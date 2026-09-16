@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`TypeCoercion::stringListValue()`** centralizing the list-or-comma-separated-string coercion used by
   `stream_placement_tags`.
 
+### Fixed
+- **A closed client is dialled again on the next operation.** Once the NATS client reaches its terminal
+  Closed state (the first drop with `reconnect` off, exhausted `max_reconnect_attempts` with it on, or
+  rejected credentials) it refuses every request, and the transport only ever connected when no JetStream
+  context existed yet. A consumer worker exits on the failed `get()`, but a producer dispatching from
+  inside a message handler survives the exception as a handler failure and kept a dead client for the
+  rest of the process, failing every later dispatch. `connectIfNeeded()` now re-dials a Closed client
+  and, like `close()`, lets `auto_setup` verify provisioning again on the fresh connection.
+
 ## [5.1.0] - 2026-08-09
 
 A **minor** release. It adds fifteen new DSN options and the `auto_setup` provisioning mode, and fixes
